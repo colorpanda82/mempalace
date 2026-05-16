@@ -1001,6 +1001,35 @@ def cmd_instructions(args):
     run_instructions(name=args.name)
 
 
+
+def cmd_janitor(args):
+    """F5 janitor — decay scoring (read-only) + optional accessed_at backfill."""
+    from .janitor import scan, write_report, summarize, backfill_metadata
+    import json as _json
+    if args.backfill:
+        n = backfill_metadata(dry_run=not args.apply)
+        action = "backfilled" if args.apply else "would-backfill (dry-run)"
+        print(f"janitor: {action} {n} drawers")
+        return
+    rows = scan(wing=args.wing, limit=args.limit)
+    p = write_report(rows)
+    print(f"janitor: wrote {len(rows)} rows -> {p}")
+    print(f"janitor: summary {_json.dumps(summarize(rows), sort_keys=True)}")
+
+
+def cmd_shadow_index(args):
+    """F5 shadow index — HyDE read-only flagging of KG triples vs ChromaDB."""
+    from .shadow_index import audit, list_flagged
+    import json as _json
+    if args.action == "audit":
+        r = audit(n_samples=args.n_samples, n_results=args.n_results)
+        print(_json.dumps(r, sort_keys=True))
+        return
+    if args.action == "list-flagged":
+        for row in list_flagged(limit=args.limit):
+            print(_json.dumps(row, sort_keys=True))
+
+
 def cmd_mcp(args):
     """Show how to wire MemPalace into MCP-capable hosts."""
     base_server_cmd = "mempalace-mcp"
@@ -1577,6 +1606,22 @@ def main():
 
     sub.add_parser("status", help="Show what's been filed")
 
+    # F5 — Phase 3 self-healing
+    p_janitor = sub.add_parser("janitor", help="F5 decay scoring (read-only)")
+    p_janitor.add_argument("--wing", default=None)
+    p_janitor.add_argument("--limit", type=int, default=None)
+    p_janitor.add_argument("--backfill", action="store_true",
+                           help="Seed accessed_at=created_at for drawers missing it")
+    p_janitor.add_argument("--apply", action="store_true",
+                           help="Commit backfill writes (default: dry-run)")
+    p_shadow = sub.add_parser("shadow-index", help="F5 HyDE read-only flagging")
+    shadow_sub = p_shadow.add_subparsers(dest="action", required=True)
+    p_sa = shadow_sub.add_parser("audit", help="Sample triples and flag unsupported ones")
+    p_sa.add_argument("--n-samples", type=int, default=20)
+    p_sa.add_argument("--n-results", type=int, default=5)
+    p_sl = shadow_sub.add_parser("list-flagged", help="Show recent flagged triples")
+    p_sl.add_argument("--limit", type=int, default=20)
+
     args = parser.parse_args()
 
     if not args.command:
@@ -1614,6 +1659,8 @@ def main():
         "repair-status": cmd_repair_status,
         "migrate": cmd_migrate,
         "status": cmd_status,
+        "janitor": cmd_janitor,
+        "shadow-index": cmd_shadow_index,
     }
     dispatch[args.command](args)
 
