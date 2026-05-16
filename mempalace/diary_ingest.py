@@ -318,7 +318,9 @@ def ingest_diaries(
             }
         days_updated += 1
 
-    state_file.write_text(json.dumps(state, indent=2))
+    _tmp = state_file.with_suffix(".tmp")
+    _tmp.write_text(json.dumps(state, indent=2))
+    os.replace(_tmp, state_file)
     if days_updated:
         print(f"Diary: {days_updated} days updated, {closets_created} new closets")
 
