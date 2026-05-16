@@ -40,7 +40,7 @@ import json
 import os
 import sqlite3
 import threading
-from datetime import date, datetime
+from datetime import date
 from pathlib import Path
 from typing import Optional
 from .config import sanitize_iso_temporal
@@ -173,6 +173,9 @@ class KnowledgeGraph:
             CREATE INDEX IF NOT EXISTS idx_triples_object ON triples(object);
             CREATE INDEX IF NOT EXISTS idx_triples_predicate ON triples(predicate);
             CREATE INDEX IF NOT EXISTS idx_triples_valid ON triples(valid_from, valid_to);
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_triples_active_unique
+              ON triples(subject, predicate, object)
+              WHERE valid_to IS NULL;
         """)
         self._migrate_schema(conn)
         conn.commit()
@@ -302,9 +305,10 @@ class KnowledgeGraph:
                 if existing:
                     return existing["id"]  # Already exists and still valid
 
-                triple_id = f"t_{sub_id}_{pred}_{obj_id}_{hashlib.sha256(f'{valid_from}{datetime.now().isoformat()}'.encode()).hexdigest()[:12]}"
+                hash_seed = "{}|{}|{}|{}".format(sub_id, pred, obj_id, valid_from or "")
+                triple_id = "t_{}_{}_{}_{}".format(sub_id, pred, obj_id, hashlib.sha256(hash_seed.encode()).hexdigest()[:12])
                 conn.execute(
-                    """INSERT INTO triples (
+                    """INSERT OR IGNORE INTO triples (
                         id, subject, predicate, object, valid_from, valid_to,
                         confidence, source_closet, source_file,
                         source_drawer_id, adapter_name
