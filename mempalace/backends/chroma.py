@@ -994,6 +994,31 @@ def _close_client(client) -> None:
         logger.debug("client.close() unavailable or failed", exc_info=True)
 
 
+# ---------------------------------------------------------------------------
+# I4: embedder provenance. Stamp {embedder, dim, indexed_at} on every write so
+# the reconciler can detect partial migrations (a record carrying a dim != the
+# collection dimension). Provenance is process-constant (config does not change
+# mid-run), so resolve the configured embedder once and cache it.
+# ---------------------------------------------------------------------------
+
+_PROVENANCE_KNOWN_DIMS = {"embeddinggemma": 384, "minilm": 384}
+_provenance_cache = None
+
+
+def _current_embedder_provenance():
+    """Return ``(embedder_name, dim)`` for the configured embedder, cached per process."""
+    global _provenance_cache
+    if _provenance_cache is None:
+        try:
+            from ..config import MempalaceConfig
+
+            model = MempalaceConfig().embedding_model
+        except Exception:  # pragma: no cover - config unreadable
+            model = "unknown"
+        _provenance_cache = (model, _PROVENANCE_KNOWN_DIMS.get(model, 384))
+    return _provenance_cache
+
+
 class ChromaCollection(BaseCollection):
     """Thin adapter translating ChromaDB dict returns into typed results.
 
@@ -1056,9 +1081,33 @@ class ChromaCollection(BaseCollection):
             for m in metadatas
         ]
 
+    @staticmethod
+    def _stamp_provenance(metadatas, embeddings, ids):
+        """Inject {embedder, dim, indexed_at} on every metadata dict (I4).
+
+        Forward-only provenance: ``dim`` is taken from the explicit embedding
+        width when provided, else the configured embedder's known dimension.
+        Existing keys are preserved; provenance keys are overwritten on
+        re-index. Always returns a list (never None) so every written record is
+        tagged.
+        """
+        embedder, known_dim = _current_embedder_provenance()
+        dim = len(embeddings[0]) if embeddings else known_dim
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        base = metadatas if metadatas is not None else [{} for _ in ids]
+        stamped = []
+        for m in base:
+            d = dict(m) if isinstance(m, dict) else {}
+            d["embedder"] = embedder
+            d["dim"] = int(dim)
+            d["indexed_at"] = now
+            stamped.append(d)
+        return stamped
+
     def add(self, *, documents, ids, metadatas=None, embeddings=None):
         kwargs: dict[str, Any] = {"documents": documents, "ids": ids}
-        sanitized = self._sanitize_metadatas_for_chromadb(metadatas)
+        stamped = self._stamp_provenance(metadatas, embeddings, ids)
+        sanitized = self._sanitize_metadatas_for_chromadb(stamped)
         if sanitized is not None:
             kwargs["metadatas"] = sanitized
         if embeddings is not None:
@@ -1068,7 +1117,8 @@ class ChromaCollection(BaseCollection):
 
     def upsert(self, *, documents, ids, metadatas=None, embeddings=None):
         kwargs: dict[str, Any] = {"documents": documents, "ids": ids}
-        sanitized = self._sanitize_metadatas_for_chromadb(metadatas)
+        stamped = self._stamp_provenance(metadatas, embeddings, ids)
+        sanitized = self._sanitize_metadatas_for_chromadb(stamped)
         if sanitized is not None:
             kwargs["metadatas"] = sanitized
         if embeddings is not None:

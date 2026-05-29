@@ -780,6 +780,17 @@ def tool_status():
         logger.exception("tool_status metadata fetch failed")
         result["error"] = str(e)
         result["partial"] = True
+    # I4: fixed-ID canary -- confirm known-good drawers still retrieve (exact get(),
+    # immune to HNSW/dim issues). Never raises into status.
+    try:
+        from .canary import run_canary_check
+
+        cr = run_canary_check(col)
+        result["canary"] = cr["status"]
+        if cr["status"] not in ("ok", "unseeded"):
+            result["canary_missing"] = cr.get("missing_ids", [])
+    except Exception as _canary_exc:
+        result["canary"] = "error: %s" % _canary_exc
     return result
 
 
