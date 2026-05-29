@@ -93,6 +93,11 @@ from .knowledge_graph import KnowledgeGraph, DEFAULT_KG_PATH  # noqa: E402
 # embeds via the ChromaDB embedding function.
 _DEFAULT_EMBED_MODEL = "embeddinggemma_300m"
 
+# I6: content validation + per-process MCP session id for write provenance (2C).
+import uuid as _uuid
+from .content_validator import validate_content, quarantine_content
+_MCP_SESSION_ID = _uuid.uuid4().hex[:12]
+
 
 def _init_logging() -> None:
     """Root-logger init: always stderr, optionally append to ``MEMPALACE_LOG_FILE``.
@@ -1146,6 +1151,13 @@ def tool_add_drawer(
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
+    # I6(2A): block injection/exfil content; quarantine + return, never raise.
+    _cv_ok, _cv_reason = validate_content(content, source="add_drawer:%s" % added_by)
+    if not _cv_ok:
+        _qpath = quarantine_content(content, _cv_reason, source="add_drawer:%s" % added_by)
+        logger.warning("[content-validator] add_drawer quarantined (%s): %s", _cv_reason, _qpath)
+        return {"success": False, "reason": "quarantined", "detail": _cv_reason, "quarantine_path": _qpath}
+
     col = _get_collection(create=True)
     if not col:
         return _no_palace()
@@ -1174,6 +1186,8 @@ def tool_add_drawer(
         "added_by": added_by,
         "filed_at": datetime.now().isoformat(),
         "embedding_model": _DEFAULT_EMBED_MODEL,
+        "source": "mcp",
+        "session_id": _MCP_SESSION_ID,
     }
 
     # Idempotency. Three cases to detect a prior committed write:
@@ -1678,6 +1692,13 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
+    # I6(1): block injection/exfil content in diary entries; quarantine + return, never raise.
+    _cv_ok, _cv_reason = validate_content(entry, source="diary_write:%s" % agent_name)
+    if not _cv_ok:
+        _qpath = quarantine_content(entry, _cv_reason, source="diary_write:%s" % agent_name)
+        logger.warning("[content-validator] diary quarantined (%s): %s", _cv_reason, _qpath)
+        return {"success": False, "reason": "quarantined", "detail": _cv_reason, "quarantine_path": _qpath}
+
     if wing:
         wing = sanitize_name(wing)
     else:
@@ -1717,6 +1738,8 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
             "agent": agent_name,
             "filed_at": now.isoformat(),
             "date": now.strftime("%Y-%m-%d"),
+            "source": "mcp",
+            "session_id": _MCP_SESSION_ID,
         }
         chunk_size = _config.chunk_size
         if len(entry) <= chunk_size:
