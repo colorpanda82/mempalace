@@ -23,8 +23,9 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from .config import MempalaceConfig
@@ -264,17 +265,87 @@ def backfill_metadata(palace_path=None, dry_run=True):
     return touched
 
 
+_EXPIRES_AT_RE = re.compile(r'expires_at:\s*(\d{4}-\d{2}-\d{2})', re.MULTILINE)
+
+
+def prune_expired(palace_path=None, dry_run=True):
+    """Delete drawers whose content contains 'expires_at: YYYY-MM-DD' past today.
+
+    Convention: any working/task-state drawer may include a line
+        expires_at: 2026-05-25
+    to request automatic TTL deletion. Semantic drawers (facts, config,
+    lessons-learned) should never include this field.
+
+    Returns (scanned, deleted) counts.
+    """
+    cfg = MempalaceConfig()
+    pp = palace_path or cfg.palace_path
+    col = get_collection(pp, create=False)
+
+    today = date.today()
+    _BATCH = 200
+    offset = 0
+    scanned = 0
+    to_delete = []
+
+    while True:
+        try:
+            batch = col.get(include=["documents", "metadatas"], limit=_BATCH, offset=offset)
+        except Exception as e:
+            print(f"prune_expired: chroma get failed at offset {offset}: {e}", file=sys.stderr)
+            break
+        ids = batch.get("ids", []) or []
+        docs = batch.get("documents", []) or []
+        metas = batch.get("metadatas", []) or []
+        if not ids:
+            break
+        for did, doc, meta in zip(ids, docs, metas):
+            scanned += 1
+            exp_str = None
+            # Check content body first
+            if doc:
+                m = _EXPIRES_AT_RE.search(doc)
+                if m:
+                    exp_str = m.group(1)
+            # Fallback: check metadata field
+            if exp_str is None and meta:
+                exp_str = meta.get("expires_at")
+            if exp_str is None:
+                continue
+            try:
+                exp_date = date.fromisoformat(exp_str)
+            except ValueError:
+                continue
+            if exp_date < today:
+                meta = meta or {}
+                to_delete.append((did, meta.get("wing", "?"), meta.get("room", "?"), exp_str))
+        offset += len(ids)
+        if len(ids) < _BATCH:
+            break
+
+    if to_delete:
+        for did, wing, room, exp_str in to_delete:
+            action = "would-delete" if dry_run else "deleting"
+            print(f"prune_expired: {action} [{wing}/{room}] {did[:48]}... (expired {exp_str})")
+        if not dry_run:
+            col.delete(ids=[d[0] for d in to_delete])
+
+    return scanned, len(to_delete)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(
         prog="mempalace janitor",
-        description="F5 decay scoring (read-only) + optional accessed_at backfill",
+        description="F5 decay scoring (read-only) + optional accessed_at backfill + TTL pruning",
     )
     p.add_argument("--wing", default=None, help="Limit scan to one wing")
     p.add_argument("--limit", type=int, default=None, help="Cap drawers scanned")
     p.add_argument("--backfill", action="store_true",
                    help="Seed accessed_at=created_at for drawers missing it")
+    p.add_argument("--prune-expired", action="store_true",
+                   help="Delete drawers with 'expires_at: YYYY-MM-DD' past today")
     p.add_argument("--apply", action="store_true",
-                   help="Commit backfill writes (default: dry-run preview)")
+                   help="Commit writes for --backfill or --prune-expired (default: dry-run)")
     args = p.parse_args(argv)
 
     _ensure_dry_run_sentinel()
@@ -283,6 +354,12 @@ def main(argv=None):
         n = backfill_metadata(dry_run=not args.apply)
         action = "backfilled" if args.apply else "would-backfill (dry-run)"
         print(f"janitor: {action} {n} drawers")
+        return 0
+
+    if args.prune_expired:
+        scanned, deleted = prune_expired(dry_run=not args.apply)
+        mode = "deleted" if args.apply else "would-delete (dry-run)"
+        print(f"janitor: prune_expired scanned={scanned} {mode}={deleted}")
         return 0
 
     rows = scan(wing=args.wing, limit=args.limit)
