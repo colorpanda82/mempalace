@@ -191,6 +191,16 @@ class EmbeddinggemmaONNX:
         model_path = hf_hub_download(
             _EMBEDDINGGEMMA_REPO, subfolder="onnx", filename=_EMBEDDINGGEMMA_ONNX
         )
+        # Local fork patch (Phase B): the q8 ONNX keeps weights in a separate
+        # model_quantized.onnx_data sidecar; onnxruntime resolves it relative to
+        # model_path. Upstream loader omits it -> "External data path does not exist".
+        try:
+            hf_hub_download(
+                _EMBEDDINGGEMMA_REPO, subfolder="onnx",
+                filename=_EMBEDDINGGEMMA_ONNX + "_data",
+            )
+        except Exception:
+            pass  # revisions without external data have no sidecar
         tok_path = hf_hub_download(_EMBEDDINGGEMMA_REPO, filename="tokenizer.json")
 
         self._session = ort.InferenceSession(model_path, providers=self._providers)
