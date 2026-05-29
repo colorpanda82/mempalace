@@ -87,6 +87,13 @@ from .palace_graph import (  # noqa: E402
 from .knowledge_graph import KnowledgeGraph, DEFAULT_KG_PATH  # noqa: E402
 
 
+# F8/Phase-B: model name stamped into documents-table provenance and drawer
+# metadata. Matches EmbeddinggemmaONNX.name() ("embeddinggemma_300m"). Plain
+# string only; the legacy Ollama embed shim is intentionally gone -- eg-384
+# embeds via the ChromaDB embedding function.
+_DEFAULT_EMBED_MODEL = "embeddinggemma_300m"
+
+
 def _init_logging() -> None:
     """Root-logger init: always stderr, optionally append to ``MEMPALACE_LOG_FILE``.
 
@@ -1155,6 +1162,7 @@ def tool_add_drawer(
         "source_file": source_file or "",
         "added_by": added_by,
         "filed_at": datetime.now().isoformat(),
+        "embedding_model": _DEFAULT_EMBED_MODEL,
     }
 
     # Idempotency. Three cases to detect a prior committed write:
@@ -1193,6 +1201,17 @@ def tool_add_drawer(
                 )
             _metadata_cache = None
             logger.info(f"Filed drawer: {drawer_id} → {wing}/{room}")
+            try:
+                _get_kg().upsert_document(
+                    drawer_id=drawer_id,
+                    content=content,
+                    wing=wing,
+                    room=room,
+                    source_file=source_file or "",
+                    embedding_model=_DEFAULT_EMBED_MODEL,
+                )
+            except Exception as _doc_err:
+                logger.warning("Document store write failed for %s: %s", drawer_id, _doc_err)
             return {
                 "success": True,
                 "drawer_id": drawer_id,
@@ -1227,6 +1246,17 @@ def tool_add_drawer(
             )
         _metadata_cache = None
         logger.info(f"Filed drawer: {drawer_id} → {wing}/{room} ({len(chunk_ids)} chunks)")
+        try:
+            _get_kg().upsert_document(
+                drawer_id=drawer_id,
+                content=content,
+                wing=wing,
+                room=room,
+                source_file=source_file or "",
+                embedding_model=_DEFAULT_EMBED_MODEL,
+            )
+        except Exception as _doc_err:
+            logger.warning("Document store write failed for %s: %s", drawer_id, _doc_err)
         return {
             "success": True,
             "drawer_id": drawer_id,
@@ -1265,6 +1295,10 @@ def tool_delete_drawer(drawer_id: str):
 
     try:
         col.delete(ids=[drawer_id])
+        try:
+            _get_kg().delete_document(drawer_id)
+        except Exception as _doc_err:
+            logger.warning("Document store delete failed for %s: %s", drawer_id, _doc_err)
         _metadata_cache = None
         logger.info(f"Deleted drawer: {drawer_id}")
         return {"success": True, "drawer_id": drawer_id}
@@ -1455,6 +1489,19 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
             update_kwargs["documents"] = [new_doc]
         update_kwargs["metadatas"] = [new_meta]
         col.update(**update_kwargs)
+
+        if content is not None:
+            try:
+                _get_kg().upsert_document(
+                    drawer_id=drawer_id,
+                    content=new_doc,
+                    wing=new_meta.get("wing", ""),
+                    room=new_meta.get("room", ""),
+                    source_file=new_meta.get("source_file", ""),
+                    embedding_model=new_meta.get("embedding_model", _DEFAULT_EMBED_MODEL),
+                )
+            except Exception as _doc_err:
+                logger.warning("Document store update failed for %s: %s", drawer_id, _doc_err)
 
         _metadata_cache = None
 

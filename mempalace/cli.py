@@ -1198,6 +1198,33 @@ def _reconfigure_stdio_utf8_on_windows():
     reconfigure_stdio_utf8_on_windows(stdout_errors="replace", stderr_errors="replace")
 
 
+
+def _cmd_rebuild_index(args):
+    """F8 — report document store stats; --execute triggers re-embedding."""
+    from .knowledge_graph import KnowledgeGraph
+    from .config import MempalaceConfig
+    import os
+
+    cfg = MempalaceConfig()
+    db_path = (
+        os.path.join(cfg.palace_path, "knowledge_graph.sqlite3")
+        if cfg.palace_path else None
+    )
+    kg = KnowledgeGraph(db_path=db_path)
+    total = kg.document_count()
+    print(f"Raw-text document store: {total} documents")
+
+    if total == 0:
+        print("Store is empty — new add_drawer calls will populate it going forward.")
+        print("Run a backfill job to populate from existing ChromaDB drawers.")
+        return
+
+    if not args.execute:
+        print("Pass --execute to trigger re-embedding (delegates to Jarvis job).")
+        return
+
+    print("Re-embed: dispatch scripts/f8-rebuild-index.py as a Jarvis job.")
+
 def main():
     """CLI entry point for the ``mempalace`` console script.
 
@@ -1607,6 +1634,14 @@ def main():
     sub.add_parser("status", help="Show what's been filed")
 
     # F5 — Phase 3 self-healing
+    p_rebuild = sub.add_parser(
+        "rebuild-index",
+        help="F8 — raw-text document store stats and re-embed trigger",
+    )
+    p_rebuild.add_argument(
+        "--execute", action="store_true",
+        help="trigger re-embedding (delegates to Jarvis job)",
+    )
     p_janitor = sub.add_parser("janitor", help="F5 decay scoring (read-only)")
     p_janitor.add_argument("--wing", default=None)
     p_janitor.add_argument("--limit", type=int, default=None)
@@ -1662,6 +1697,9 @@ def main():
         "janitor": cmd_janitor,
         "shadow-index": cmd_shadow_index,
     }
+    if args.command == "rebuild-index":
+        _cmd_rebuild_index(args)
+        return
     dispatch[args.command](args)
 
 
