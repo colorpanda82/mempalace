@@ -233,6 +233,15 @@ class EmbeddinggemmaONNX:
         norms = np.linalg.norm(sent_emb, axis=1, keepdims=True) + 1e-12
         return (sent_emb / norms).tolist()
 
+    # Local fork patch (Phase B): chromadb >=1.x dispatches the query path to
+    # embed_query() and the document path to embed_documents(); this plain EF
+    # only had __call__, so query_texts raised AttributeError. Delegate both.
+    def embed_documents(self, input):  # noqa: A002
+        return self(input)
+
+    def embed_query(self, input):  # noqa: A002
+        return self(input if isinstance(input, (list, tuple)) else [input])
+
 
 def get_embedding_function(device: Optional[str] = None, model: Optional[str] = None):
     """Return a cached embedding function for the requested device + model.
