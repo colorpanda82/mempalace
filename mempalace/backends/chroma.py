@@ -137,6 +137,54 @@ _HNSW_BLOAT_GUARD = {
 _HNSW_MISSING_METADATA_DATA_FLOOR = 1024
 
 
+def _collection_size_and_sync_threshold(db_path: str):
+    """Return (total embedding count, hnsw:sync_threshold) for a palace's
+    ``chroma.sqlite3``, or ``(None, None)`` if it cannot be read.
+
+    chromadb 1.x only persists the HNSW index — writing ``index_metadata.pickle``
+    and a populated ``link_lists.bin`` — once a collection accumulates
+    ``hnsw:sync_threshold`` embeddings (chromadb default 1000). Below that it
+    serves from the sqlite-backed index and leaves a pre-allocated,
+    metadata-less segment on disk. Callers use this to tell that benign
+    deferred-persist state apart from a genuine partial flush. Assumes the
+    single-collection mempalace layout; any read failure returns
+    ``(None, None)`` so callers fall back to the strict integrity checks.
+    """
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    except sqlite3.Error:
+        return None, None
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM embeddings").fetchone()[0]
+        row = conn.execute(
+            "SELECT int_value FROM collection_metadata "
+            "WHERE key = 'hnsw:sync_threshold' AND int_value IS NOT NULL "
+            "LIMIT 1"
+        ).fetchone()
+        threshold = int(row[0]) if row and row[0] is not None else 1000
+        return int(count), threshold
+    except (sqlite3.Error, TypeError, ValueError, IndexError):
+        return None, None
+    finally:
+        conn.close()
+
+
+def _is_unsynced_chroma1x_scaffold(seg_dir: str) -> bool:
+    """True for the exact on-disk shape chromadb 1.x leaves for a collection
+    below ``hnsw:sync_threshold``: a pre-allocated ``data_level0.bin`` with NO
+    ``index_metadata.pickle`` and an empty/absent ``link_lists.bin``. This is
+    deferred-persist scaffolding, not a partial flush — the vectors live in
+    sqlite and chromadb rebuilds the index on demand.
+    """
+    if os.path.isfile(os.path.join(seg_dir, "index_metadata.pickle")):
+        return False
+    link_path = os.path.join(seg_dir, "link_lists.bin")
+    try:
+        return (not os.path.isfile(link_path)) or os.path.getsize(link_path) == 0
+    except OSError:
+        return False
+
+
 def _validate_where(where: Optional[dict]) -> None:
     """Scan a where-clause for unknown operators and raise ``UnsupportedFilterError``.
 
@@ -246,6 +294,19 @@ def quarantine_stale_hnsw(palace_path: str, stale_seconds: float = 300.0) -> lis
     except OSError:
         return []
 
+    # chromadb 1.x defers HNSW persistence until a collection crosses its
+    # hnsw:sync_threshold; below it the on-disk segment is a metadata-less,
+    # empty-link_lists scaffold (vectors live in sqlite). Detect that state so
+    # the integrity gate below can leave such segments in place instead of
+    # looping quarantine/rebuild on small palaces (the chromadb-1.x .drift
+    # churn). (None, None) on any read failure -> strict behavior preserved.
+    persisted_count, sync_threshold = _collection_size_and_sync_threshold(db_path)
+    below_sync_threshold = (
+        persisted_count is not None
+        and sync_threshold is not None
+        and persisted_count < sync_threshold
+    )
+
     moved: list[str] = []
 
     try:
@@ -274,6 +335,28 @@ def quarantine_stale_hnsw(palace_path: str, stale_seconds: float = 300.0) -> lis
         payload_corrupt = payload_ratio is not None and payload_ratio > _HNSW_LINK_TO_DATA_MAX_RATIO
 
         if not payload_corrupt and sqlite_mtime - hnsw_mtime < stale_seconds:
+            continue
+
+        # chromadb-1.x deferred-persist: below hnsw:sync_threshold, chromadb
+        # leaves a metadata-less, empty-link_lists scaffold and serves from
+        # sqlite. That trips the structural checks below but is not corruption
+        # -- quarantining it only forces a needless rebuild loop. Bloated
+        # payloads (payload_corrupt) and post-threshold partial flushes are
+        # unaffected and still quarantined.
+        if (
+            not payload_corrupt
+            and below_sync_threshold
+            and _is_unsynced_chroma1x_scaffold(seg_dir)
+        ):
+            logger.info(
+                "HNSW segment %s has no index_metadata.pickle and an empty "
+                "link_lists.bin, but the collection is below hnsw:sync_threshold "
+                "(%s < %s) -- chromadb-1.x deferred-persist, not corruption. "
+                "Leaving in place.",
+                seg_dir,
+                persisted_count,
+                sync_threshold,
+            )
             continue
 
         # Stage 2: integrity gate. Mtime drift alone is not corruption because
