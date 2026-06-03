@@ -333,7 +333,7 @@ def _warn_if_legacy_metric(col) -> None:
     print(
         f"\n  NOTICE: this palace was created without cosine distance ({detail}).\n"
         "          Semantic similarity scores will not be meaningful.\n"
-        "          Run `mempalace repair` to rebuild the index with the correct metric.",
+        "          To set cosine metadata, rebuild with `mempalace-rebuild-fresh.sh <palace>`. Do NOT run `mempalace repair` on a sub-50k palace -- it rebuilds in-place and re-corrupts the index.",
         file=_sys.stderr,
     )
 
