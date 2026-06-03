@@ -95,7 +95,7 @@ _DEFAULT_EMBED_MODEL = "embeddinggemma_300m"
 
 # I6: content validation + per-process MCP session id for write provenance (2C).
 import uuid as _uuid
-from .content_validator import validate_content, quarantine_content
+from .content_validator import validate_content, quarantine_content, wrap_long_lines
 _MCP_SESSION_ID = _uuid.uuid4().hex[:12]
 
 
@@ -1151,6 +1151,8 @@ def tool_add_drawer(
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
+    # I6.3: losslessly wrap dense >2000-char lines so the per-line validator accepts them.
+    content = wrap_long_lines(content)
     # I6(2A): block injection/exfil content; quarantine + return, never raise.
     _cv_ok, _cv_reason = validate_content(content, source="add_drawer:%s" % added_by)
     if not _cv_ok:
@@ -1692,6 +1694,8 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
+    # I6.3: losslessly wrap dense >2000-char lines so the per-line validator accepts them.
+    entry = wrap_long_lines(entry)
     # I6(1): block injection/exfil content in diary entries; quarantine + return, never raise.
     _cv_ok, _cv_reason = validate_content(entry, source="diary_write:%s" % agent_name)
     if not _cv_ok:

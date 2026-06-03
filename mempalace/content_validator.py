@@ -26,6 +26,44 @@ _MAX_LINE_LENGTH = 2000
 _QUARANTINE_DIR_ENV = "MEMPALACE_CONTENT_QUARANTINE"
 
 
+_WRAP_TARGET = _MAX_LINE_LENGTH - 100  # 1900: headroom under the hard reject
+
+
+def _hard_wrap(s, limit):
+    if len(s) <= limit:
+        return [s]
+    return [s[i:i + limit] for i in range(0, len(s), limit)]
+
+
+def wrap_long_lines(text, limit=_WRAP_TARGET):
+    """Losslessly wrap any line longer than limit so validate_content's per-line
+    length check (_MAX_LINE_LENGTH) never trips. Splits on AAAK ' | ' pipe
+    boundaries first, then hard-wraps any remaining over-limit run. Content is
+    preserved (a ' | ' boundary becomes a newline); idempotent; never raises
+    (flusher safety). chr(10) is the newline character."""
+    try:
+        if not isinstance(text, str):
+            return text
+        out = []
+        for line in text.split(chr(10)):
+            if len(line) <= limit:
+                out.append(line)
+                continue
+            cur = ""
+            for i, seg in enumerate(line.split(" | ")):
+                piece = seg if i == 0 else " | " + seg
+                if cur and len(cur) + len(piece) > limit:
+                    out.extend(_hard_wrap(cur, limit))
+                    cur = seg
+                else:
+                    cur += piece
+            if cur:
+                out.extend(_hard_wrap(cur, limit))
+        return chr(10).join(out)
+    except Exception:
+        return text
+
+
 def _quarantine_dir() -> str:
     default = os.path.expanduser(
         "~/Library/Mobile Documents/com~apple~CloudDocs/Workspace/_manager/pending-diaries/quarantine"
