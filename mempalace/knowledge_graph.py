@@ -200,6 +200,14 @@ class KnowledgeGraph:
             conn.execute("ALTER TABLE triples ADD COLUMN source_drawer_id TEXT")
         if "adapter_name" not in existing:
             conn.execute("ALTER TABLE triples ADD COLUMN adapter_name TEXT")
+        # G1b — atomic active-triple dedup: partial unique index over
+        # (subject, predicate, object) restricted to active rows
+        # (valid_to IS NULL).  CREATE UNIQUE INDEX IF NOT EXISTS is
+        # idempotent and safe on existing palaces with any row count.
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_triples_active_unique "
+            "ON triples(subject, predicate, object) WHERE valid_to IS NULL"
+        )
 
     def _conn(self):
         if self._connection is None:
@@ -302,19 +310,15 @@ class KnowledgeGraph:
                     (obj_id, obj),
                 )
 
-                # Check for existing identical triple
-                existing = conn.execute(
-                    "SELECT id FROM triples WHERE subject=? AND predicate=? AND object=? AND valid_to IS NULL",
-                    (sub_id, pred, obj_id),
-                ).fetchone()
-                if existing:
-                    return existing["id"]  # Already exists and still valid
-
                 triple_id = make_triple_id(
                     sub_id, pred, obj_id, valid_from, datetime.now().isoformat()
                 )
+                # INSERT OR IGNORE: idx_triples_active_unique silently absorbs
+                # a conflict when an identical active triple already exists,
+                # making dedup atomic and race-free.  This eliminates the
+                # SELECT-then-INSERT TOCTOU window.
                 conn.execute(
-                    """INSERT INTO triples (
+                    """INSERT OR IGNORE INTO triples (
                         id, subject, predicate, object, valid_from, valid_to,
                         confidence, source_closet, source_file,
                         source_drawer_id, adapter_name
@@ -333,7 +337,20 @@ class KnowledgeGraph:
                         adapter_name,
                     ),
                 )
-                return triple_id
+                # The partial index idx_triples_active_unique only covers rows
+                # where valid_to IS NULL.  When valid_to is set the INSERT
+                # always lands and there is nothing to reconcile.
+                if valid_to is not None:
+                    return triple_id
+                # For active rows (valid_to IS NULL) the INSERT may have been
+                # silently skipped by the partial index.  Fetch whichever row
+                # (new or pre-existing) now holds the active slot.
+                row = conn.execute(
+                    "SELECT id FROM triples"
+                    " WHERE subject=? AND predicate=? AND object=? AND valid_to IS NULL",
+                    (sub_id, pred, obj_id),
+                ).fetchone()
+                return row["id"]
 
     def invalidate(self, subject: str, predicate: str, obj: str, ended: str = None):
         """Mark a relationship as no longer valid (set valid_to date/time)."""
