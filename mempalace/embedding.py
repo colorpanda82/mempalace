@@ -31,6 +31,16 @@ rather than hard-failing — mining must still work on a laptop without CUDA.
 
 from __future__ import annotations
 
+# --- offline embedder pin (added 2026-06-04) -------------------------------
+# embeddinggemma-300m ONNX is fully cached on this host. Without this, every cold
+# load makes an unauthenticated HF-Hub revision check (the 'set a HF_TOKEN'
+# warning) and would fail if HF were unreachable. setdefault keeps it overridable:
+# `export HF_HUB_OFFLINE=0` to allow a genuine re-download (e.g. model switch).
+import os as _os
+_os.environ.setdefault("HF_HUB_OFFLINE", "1")
+_os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+# ---------------------------------------------------------------------------
+
 import logging
 import threading
 from typing import Optional

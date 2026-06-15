@@ -143,9 +143,32 @@ class Layer1:
                     break
             scored.append((importance, meta, doc))
 
-        # Sort by importance descending, take top N
-        scored.sort(key=lambda x: x[0], reverse=True)
-        top = scored[: self.MAX_DRAWERS]
+        # Sort by (importance desc, drawer_id asc) for byte-deterministic L1 prefix.
+        # Without the secondary key, importance-3 ties (the default for un-scored
+        # drawers, which is most of them) break by ChromaDB scan order and the L1
+        # output can drift between runs against the same palace snapshot.
+        # F5: per-namespace decay applied to importance (deboost only, not delete).
+        # Decay derives from age_days vs namespace half-life. Direct queries
+        # (Layer3 search) are unaffected — this only reshuffles the L1 always-loaded
+        # wake-up so stale drawers don't crowd out fresh ones.
+        try:
+            from .janitor import score_drawer as _f5_score_drawer
+        except Exception:
+            _f5_score_drawer = None
+        if _f5_score_drawer is not None:
+            decayed = []
+            for imp, meta, doc in scored:
+                try:
+                    s = _f5_score_drawer(meta)
+                    effective = imp * s["recency_weight"]
+                except Exception:
+                    effective = imp
+                decayed.append((effective, meta, doc, imp))
+            decayed.sort(key=lambda x: (-x[0], x[1].get("drawer_id", "") if x[1] else ""))
+            top = [(imp_orig, meta, doc) for _eff, meta, doc, imp_orig in decayed[: self.MAX_DRAWERS]]
+        else:
+            scored.sort(key=lambda x: (-x[0], x[1].get("drawer_id", "") if x[1] else ""))
+            top = scored[: self.MAX_DRAWERS]
 
         # Group by room for readability
         by_room = defaultdict(list)

@@ -147,6 +147,34 @@ _HNSW_BLOAT_GUARD = {
 _HNSW_MISSING_METADATA_DATA_FLOOR = 1024
 
 
+# ---------------------------------------------------------------------------
+# I4: embedder provenance. Stamp {embedder, dim, indexed_at} on every write so
+# the reconciler can detect partial migrations (a record carrying a dim != the
+# collection dimension). Provenance is process-constant (config does not change
+# mid-run), so resolve the configured embedder once and cache it.
+# NOTE: _sidecar.py (upstream v3.4.1) records embedder identity to a JSON file.
+# Our stamping writes the same info into ChromaDB metadata per-record.
+# TODO(phase2b): dedupe vs _sidecar — converge to one canonical provenance store.
+# ---------------------------------------------------------------------------
+
+_PROVENANCE_KNOWN_DIMS = {"embeddinggemma": 384, "minilm": 384}
+_provenance_cache = None
+
+
+def _current_embedder_provenance():
+    """Return ``(embedder_name, dim)`` for the configured embedder, cached per process."""
+    global _provenance_cache
+    if _provenance_cache is None:
+        try:
+            from ..config import MempalaceConfig
+
+            model = MempalaceConfig().embedding_model
+        except Exception:  # pragma: no cover - config unreadable
+            model = "unknown"
+        _provenance_cache = (model, _PROVENANCE_KNOWN_DIMS.get(model, 384))
+    return _provenance_cache
+
+
 def _validate_where(where: Optional[dict]) -> None:
     """Scan a where-clause for unknown operators and raise ``UnsupportedFilterError``.
 
@@ -1288,12 +1316,36 @@ class ChromaCollection(BaseCollection):
             return strip_lone_surrogates(documents)
         return [strip_lone_surrogates(d) if isinstance(d, str) else d for d in documents]
 
+    @staticmethod
+    def _stamp_provenance(metadatas, embeddings, ids):
+        """Inject {embedder, dim, indexed_at} on every metadata dict (I4).
+
+        Forward-only provenance: ``dim`` is taken from the explicit embedding
+        width when provided, else the configured embedder's known dimension.
+        Existing keys are preserved; provenance keys are overwritten on
+        re-index. Always returns a list (never None) so every written record is
+        tagged.
+        """
+        embedder, known_dim = _current_embedder_provenance()
+        dim = len(embeddings[0]) if embeddings else known_dim
+        now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+        base = metadatas if metadatas is not None else [{} for _ in ids]
+        stamped = []
+        for m in base:
+            d = dict(m) if isinstance(m, dict) else {}
+            d["embedder"] = embedder
+            d["dim"] = int(dim)
+            d["indexed_at"] = now
+            stamped.append(d)
+        return stamped
+
     def add(self, *, documents, ids, metadatas=None, embeddings=None):
         kwargs: dict[str, Any] = {
             "documents": self._sanitize_documents_for_chromadb(documents),
             "ids": ids,
         }
-        sanitized = self._sanitize_metadatas_for_chromadb(metadatas)
+        stamped = self._stamp_provenance(metadatas, embeddings, ids)
+        sanitized = self._sanitize_metadatas_for_chromadb(stamped)
         if sanitized is not None:
             kwargs["metadatas"] = sanitized
         if embeddings is not None:
@@ -1306,7 +1358,8 @@ class ChromaCollection(BaseCollection):
             "documents": self._sanitize_documents_for_chromadb(documents),
             "ids": ids,
         }
-        sanitized = self._sanitize_metadatas_for_chromadb(metadatas)
+        stamped = self._stamp_provenance(metadatas, embeddings, ids)
+        sanitized = self._sanitize_metadatas_for_chromadb(stamped)
         if sanitized is not None:
             kwargs["metadatas"] = sanitized
         if embeddings is not None:

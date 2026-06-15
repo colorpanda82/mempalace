@@ -1875,3 +1875,99 @@ def test_palace_get_collection_uses_configured_collection_name(monkeypatch):
         "collection_name": "custom_drawers",
         "create": False,
     }
+
+
+# ── chromadb-1.x sub-sync_threshold scaffold (eg-384 .drift loop fix) ──────
+
+
+def test_quarantine_leaves_chroma1x_sub_threshold_scaffold(tmp_path):
+    """Regression: a chromadb-1.x collection below hnsw:sync_threshold leaves a
+    metadata-less, empty-link_lists scaffold on disk; it must NOT be
+    quarantined (the .drift loop on small eg-384 palaces)."""
+    import chromadb
+    import gc
+
+    palace = tmp_path / "palace"
+    client = chromadb.PersistentClient(path=str(palace))
+    col = client.create_collection("regress_collection")
+    col.add(
+        ids=[f"id{i}" for i in range(20)],
+        embeddings=[[float((i * 7 + j) % 13) for j in range(384)] for i in range(20)],
+        documents=[f"doc{i}" for i in range(20)],
+    )
+    col.get(ids=["id0"])
+    del col, client
+    gc.collect()
+
+    seg_dirs = [
+        p for p in palace.iterdir()
+        if p.is_dir() and "-" in p.name and ".drift-" not in p.name
+        and (p / "data_level0.bin").is_file()
+    ]
+    assert len(seg_dirs) == 1, f"expected one vector segment, got {seg_dirs}"
+    seg = seg_dirs[0]
+    assert (seg / "data_level0.bin").stat().st_size > _HNSW_MISSING_METADATA_DATA_FLOOR
+    assert not (seg / "index_metadata.pickle").exists()
+    link = seg / "link_lists.bin"
+    assert (not link.exists()) or link.stat().st_size == 0, "test assumes empty-link_lists scaffold"
+
+    now = 1_700_000_000.0
+    os.utime(seg / "data_level0.bin", (now - 7200, now - 7200))
+    os.utime(palace / "chroma.sqlite3", (now, now))
+
+    moved = quarantine_stale_hnsw(str(palace), stale_seconds=3600.0)
+    assert moved == [], f"sub-threshold scaffold was wrongly quarantined: {moved}"
+    assert seg.exists()
+
+
+def test_quarantine_still_renames_over_threshold_missing_metadata(tmp_path):
+    """The sub-threshold exemption must NOT weaken detection above
+    sync_threshold: missing pickle + non-trivial data with count >=
+    sync_threshold is still a partial flush and must quarantine."""
+    import sqlite3 as _sqlite3
+
+    palace = tmp_path / "palace"
+    palace.mkdir()
+    db = palace / "chroma.sqlite3"
+    conn = _sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE embeddings (id INTEGER)")
+    conn.executemany("INSERT INTO embeddings (id) VALUES (?)", [(i,) for i in range(5)])
+    conn.execute(
+        "CREATE TABLE collection_metadata "
+        "(key TEXT, str_value TEXT, int_value INTEGER, float_value REAL)"
+    )
+    conn.execute(
+        "INSERT INTO collection_metadata (key, int_value) VALUES ('hnsw:sync_threshold', 2)"
+    )
+    conn.commit()
+    conn.close()
+
+    seg = palace / "abcd-1234-5678"
+    seg.mkdir()
+    (seg / "data_level0.bin").write_bytes(b"\0" * (_HNSW_MISSING_METADATA_DATA_FLOOR + 1))
+    (seg / "link_lists.bin").write_bytes(b"")
+    now = 1_700_000_000.0
+    os.utime(seg / "data_level0.bin", (now - 7200, now - 7200))
+    os.utime(db, (now, now))
+
+    moved = quarantine_stale_hnsw(str(palace), stale_seconds=3600.0)
+    assert len(moved) == 1, "over-threshold missing-metadata segment must quarantine"
+    assert ".drift-" in moved[0]
+    assert not seg.exists()
+
+
+def test_is_unsynced_chroma1x_scaffold_helper(tmp_path):
+    """Unit: scaffold predicate True only for no-pickle + empty/absent link_lists."""
+    from mempalace.backends.chroma import _is_unsynced_chroma1x_scaffold
+
+    seg = tmp_path / "seg"
+    seg.mkdir()
+    (seg / "data_level0.bin").write_bytes(b"\0" * 2048)
+    assert _is_unsynced_chroma1x_scaffold(str(seg)) is True
+    (seg / "link_lists.bin").write_bytes(b"")
+    assert _is_unsynced_chroma1x_scaffold(str(seg)) is True
+    (seg / "link_lists.bin").write_bytes(b"\0" * 16)
+    assert _is_unsynced_chroma1x_scaffold(str(seg)) is False
+    (seg / "link_lists.bin").write_bytes(b"")
+    (seg / "index_metadata.pickle").write_bytes(b"\x80\x04\x2e")
+    assert _is_unsynced_chroma1x_scaffold(str(seg)) is False

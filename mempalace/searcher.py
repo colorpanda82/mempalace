@@ -9,6 +9,7 @@ weak closets (regex extraction on narrative content) can only help, never
 hide drawers the direct path would have found.
 """
 
+import concurrent.futures
 import logging
 import math
 import os
@@ -33,6 +34,10 @@ from .palace import (
 # Closet pointer line format: "topic|entities|→drawer_id_a,drawer_id_b"
 # Multiple lines may join with newlines inside one closet document.
 _CLOSET_DRAWER_REF_RE = re.compile(r"→([\w,]+)")
+
+# F4-pre-B: ChromaDB HNSW cold-start can block synchronously for seconds.
+# Wrap vector query with a timeout; on miss, fall back to BM25-only.
+_VECTOR_QUERY_TIMEOUT_S = float(os.getenv("MEMPALACE_VECTOR_TIMEOUT_S", "3.0"))
 
 logger = logging.getLogger("mempalace_mcp")
 
@@ -225,6 +230,47 @@ def _hybrid_rank(
     return results
 
 
+def _mmr_rerank(hits: list, n_results: int, lambda_: float = 0.6) -> list:
+    """Maximal Marginal Relevance reranking for result diversity.
+
+    Uses token-overlap (Jaccard) as the doc-doc similarity proxy so no
+    embedding re-fetch is needed. lambda_=1.0 is pure relevance order;
+    lambda_=0.5 balances relevance and diversity. Call after _hybrid_rank.
+    Returns exactly min(n_results, len(hits)) items.
+    """
+    if len(hits) <= 1:
+        return hits[:n_results]
+
+    def _tok(text: str) -> frozenset:
+        return frozenset(_TOKEN_RE.findall(text.lower()))
+
+    def _jaccard(a: frozenset, b: frozenset) -> float:
+        u = a | b
+        return len(a & b) / len(u) if u else 0.0
+
+    token_sets = [_tok(h.get("text", "")) for h in hits]
+    relevance = [h.get("similarity", 0.0) for h in hits]
+
+    selected_idx: list[int] = []
+    remaining = list(range(len(hits)))
+
+    while remaining and len(selected_idx) < n_results:
+        best_i, best_score = None, float("-inf")
+        for i in remaining:
+            rel = relevance[i]
+            max_sim = (
+                max(_jaccard(token_sets[i], token_sets[j]) for j in selected_idx)
+                if selected_idx else 0.0
+            )
+            score = lambda_ * rel - (1 - lambda_) * max_sim
+            if score > best_score:
+                best_score, best_i = score, i
+        selected_idx.append(best_i)
+        remaining.remove(best_i)
+
+    return [hits[i] for i in selected_idx]
+
+
 def build_where_filter(wing: str = None, room: str = None) -> dict:
     """Build ChromaDB where filter for wing/room filtering."""
     if wing and room:
@@ -381,7 +427,7 @@ def _warn_if_legacy_metric(col) -> None:
     print(
         f"\n  NOTICE: this palace was created without cosine distance ({detail}).\n"
         "          Semantic similarity scores will not be meaningful.\n"
-        "          Run `mempalace repair` to rebuild the index with the correct metric.",
+        "          To set cosine metadata, rebuild with `mempalace-rebuild-fresh.sh <palace>`. Do NOT run `mempalace repair` on a sub-50k palace -- it rebuilds in-place and re-corrupts the index.",
         file=_sys.stderr,
     )
 
@@ -1009,6 +1055,8 @@ def search_memories(
     vector_disabled: bool = False,
     candidate_strategy: str = "vector",
     collection_name: str = None,
+    mmr: bool = False,
+    mmr_lambda: float = 0.6,
 ) -> dict:
     """Programmatic search — returns a dict instead of printing.
 
@@ -1082,9 +1130,23 @@ def search_memories(
         }
         if where:
             dkwargs["where"] = where
-        drawer_results = _query_drawers_with_filter_fallback(
-            drawers_col, dkwargs, query, n_results, wing, room
-        )
+        # F4-pre-B: timeout wrapper — cold-start HNSW can block for seconds.
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as _ex:
+                drawer_results = _ex.submit(
+                    lambda: _query_drawers_with_filter_fallback(
+                        drawers_col, dkwargs, query, n_results, wing, room
+                    )
+                ).result(timeout=_VECTOR_QUERY_TIMEOUT_S)
+        except concurrent.futures.TimeoutError:
+            logger.warning(
+                "ChromaDB vector query exceeded %.1fs; falling back to BM25-only (F4-pre-B)",
+                _VECTOR_QUERY_TIMEOUT_S,
+            )
+            return _bm25_only_via_sqlite(
+                query, palace_path, wing=wing, room=room,
+                n_results=n_results, collection_name=collection_name,
+            )
     except Exception as e:
         return {"error": f"Search error: {e}"}
 
@@ -1256,6 +1318,10 @@ def search_memories(
     )
     if strategy_error:
         return strategy_error
+
+    # F4c: MMR rerank — optionally diversity-boost final results.
+    if mmr and hits:
+        hits = _mmr_rerank(hits, n_results, mmr_lambda)
 
     return {
         "query": query,
