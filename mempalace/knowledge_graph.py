@@ -432,13 +432,11 @@ class KnowledgeGraph:
                 if existing:
                     return existing["id"]  # Already exists and still valid
 
-                # G1b: deterministic id — same triple always gets the same id so
-                # INSERT OR IGNORE below can silently dedup concurrent add_triple calls.
                 triple_id = make_triple_id(
-                    sub_id, pred, obj_id, valid_from, ""
+                    sub_id, pred, obj_id, valid_from, datetime.now().isoformat()
                 )
                 conn.execute(
-                    """INSERT OR IGNORE INTO triples (  -- G1b: dedup via deterministic id
+                    """INSERT INTO triples (
                         id, subject, predicate, object, valid_from, valid_to,
                         confidence, source_closet, source_file,
                         source_drawer_id, adapter_name

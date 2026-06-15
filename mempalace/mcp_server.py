@@ -1726,10 +1726,9 @@ def tool_add_drawer(
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
-    # I6.3: losslessly wrap dense >2000-char lines so the per-line validator accepts them.
-    content = wrap_long_lines(content)
     # I6(2A): block injection/exfil content; quarantine + return, never raise.
-    _cv_ok, _cv_reason = validate_content(content, source="add_drawer:%s" % added_by)
+    # Wrap a copy for validation only -- do not mutate content before storage.
+    _cv_ok, _cv_reason = validate_content(wrap_long_lines(content), source="add_drawer:%s" % added_by)
     if not _cv_ok:
         _qpath = quarantine_content(content, _cv_reason, source="add_drawer:%s" % added_by)
         logger.warning("[content-validator] add_drawer quarantined (%s): %s", _cv_reason, _qpath)
@@ -2502,10 +2501,11 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
-    # I6.3: losslessly wrap dense >2000-char lines so the per-line validator accepts them.
-    entry = wrap_long_lines(entry)
+    # I6.3+F: validate against a wrapped copy so the per-line validator accepts dense
+    # lines, but keep the original entry for storage (wrapping would insert newlines
+    # that break verbatim round-trip — same fix applied to tool_add_drawer in PATCH F).
     # I6(1): block injection/exfil content in diary entries; quarantine + return, never raise.
-    _cv_ok, _cv_reason = validate_content(entry, source="diary_write:%s" % agent_name)
+    _cv_ok, _cv_reason = validate_content(wrap_long_lines(entry), source="diary_write:%s" % agent_name)
     if not _cv_ok:
         _qpath = quarantine_content(entry, _cv_reason, source="diary_write:%s" % agent_name)
         logger.warning("[content-validator] diary quarantined (%s): %s", _cv_reason, _qpath)

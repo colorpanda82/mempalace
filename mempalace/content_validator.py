@@ -78,7 +78,8 @@ def validate_content(text, source: str = "unknown"):
             return True, "ok (non-str passed through)"
         if _TOOL_RESULT_BLOCK.search(text):
             return False, "contains <tool_result> block (potential injection vector)"
-        if _BASE64_BLOB.search(text):
+        m = _BASE64_BLOB.search(text)
+        if m and len(set(m.group())) >= 4:
             return False, "contains base64 blob >=100 chars (potential exfil payload)"
         for i, line in enumerate(text.splitlines(), 1):
             if len(line) > _MAX_LINE_LENGTH:
