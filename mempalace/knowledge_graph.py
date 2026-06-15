@@ -436,7 +436,7 @@ class KnowledgeGraph:
                     sub_id, pred, obj_id, valid_from, datetime.now().isoformat()
                 )
                 conn.execute(
-                    """INSERT INTO triples (
+                    """INSERT OR IGNORE INTO triples (
                         id, subject, predicate, object, valid_from, valid_to,
                         confidence, source_closet, source_file,
                         source_drawer_id, adapter_name
