@@ -154,7 +154,7 @@ _HNSW_MISSING_METADATA_DATA_FLOOR = 1024
 # mid-run), so resolve the configured embedder once and cache it.
 # NOTE: _sidecar.py (upstream v3.4.1) records embedder identity to a JSON file.
 # Our stamping writes the same info into ChromaDB metadata per-record.
-# TODO(phase2b): dedupe vs _sidecar — converge to one canonical provenance store.
+# NOTE: this provenance stamp overlaps upstream backends/_sidecar.py embedder-identity; revisit to de-duplicate.
 # ---------------------------------------------------------------------------
 
 _PROVENANCE_KNOWN_DIMS = {"embeddinggemma": 384, "minilm": 384}

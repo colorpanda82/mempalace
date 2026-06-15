@@ -127,7 +127,12 @@ def test_palace_path_none_skips_lock(tmp_path, monkeypatch):
         assert os.path.exists(ready), "holder failed to acquire lock"
 
         col.upsert(documents=["doc"], ids=["id-1"])
-        assert fake.upserts == [{"documents": ["doc"], "ids": ["id-1"]}]
+        # Relax to subset check: I4 fork injects {embedder, dim, indexed_at} into every
+        # upsert; assert the caller-supplied keys are present, ignore extra provenance keys.
+        assert len(fake.upserts) == 1
+        upsert_call = fake.upserts[0]
+        assert upsert_call.get("documents") == ["doc"]
+        assert upsert_call.get("ids") == ["id-1"]
     finally:
         open(release, "w").close()
         holder.join(timeout=5)
