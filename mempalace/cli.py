@@ -2776,6 +2776,34 @@ def cmd_rules(args):
     run_rules(agent_id=args.agent)
 
 
+def cmd_janitor(args):
+    """F5 janitor — decay scoring (read-only) + optional accessed_at backfill."""
+    from .janitor import scan, write_report, summarize, backfill_metadata
+    import json as _json
+    if args.backfill:
+        n = backfill_metadata(dry_run=not args.apply)
+        action = "backfilled" if args.apply else "would-backfill (dry-run)"
+        print(f"janitor: {action} {n} drawers")
+        return
+    rows = scan(wing=args.wing, limit=args.limit)
+    p = write_report(rows)
+    print(f"janitor: wrote {len(rows)} rows -> {p}")
+    print(f"janitor: summary {_json.dumps(summarize(rows), sort_keys=True)}")
+
+
+def cmd_shadow_index(args):
+    """F5 shadow index — HyDE read-only flagging of KG triples vs ChromaDB."""
+    from .shadow_index import audit, list_flagged
+    import json as _json
+    if args.action == "audit":
+        r = audit(n_samples=args.n_samples, n_results=args.n_results)
+        print(_json.dumps(r, sort_keys=True))
+        return
+    if args.action == "list-flagged":
+        for row in list_flagged(limit=args.limit):
+            print(_json.dumps(row, sort_keys=True))
+
+
 def cmd_mcp(args):
     """Show how to wire MemPalace into MCP-capable hosts."""
     base_server_cmd = "mempalace-mcp"
@@ -3097,6 +3125,33 @@ def _reconfigure_stdio_utf8_on_windows():
 
     reconfigure_stdio_utf8_on_windows(stdout_errors="replace", stderr_errors="replace")
 
+
+
+def _cmd_rebuild_index(args):
+    """F8 — report document store stats; --execute triggers re-embedding."""
+    from .knowledge_graph import KnowledgeGraph
+    from .config import MempalaceConfig
+    import os
+
+    cfg = MempalaceConfig()
+    db_path = (
+        os.path.join(cfg.palace_path, "knowledge_graph.sqlite3")
+        if cfg.palace_path else None
+    )
+    kg = KnowledgeGraph(db_path=db_path)
+    total = kg.document_count()
+    print(f"Raw-text document store: {total} documents")
+
+    if total == 0:
+        print("Store is empty — new add_drawer calls will populate it going forward.")
+        print("Run a backfill job to populate from existing ChromaDB drawers.")
+        return
+
+    if not args.execute:
+        print("Pass --execute to trigger re-embedding (delegates to Jarvis job).")
+        return
+
+    print("Re-embed: dispatch scripts/f8-rebuild-index.py as a Jarvis job.")
 
 def main():
     """CLI entry point for the ``mempalace`` console script.
@@ -3995,6 +4050,30 @@ def main():
         help="Storage backend (default: config/env/detected/chroma)",
     )
 
+    # F5 — Phase 3 self-healing
+    p_rebuild = sub.add_parser(
+        "rebuild-index",
+        help="F8 — raw-text document store stats and re-embed trigger",
+    )
+    p_rebuild.add_argument(
+        "--execute", action="store_true",
+        help="trigger re-embedding (delegates to Jarvis job)",
+    )
+    p_janitor = sub.add_parser("janitor", help="F5 decay scoring (read-only)")
+    p_janitor.add_argument("--wing", default=None)
+    p_janitor.add_argument("--limit", type=int, default=None)
+    p_janitor.add_argument("--backfill", action="store_true",
+                           help="Seed accessed_at=created_at for drawers missing it")
+    p_janitor.add_argument("--apply", action="store_true",
+                           help="Commit backfill writes (default: dry-run)")
+    p_shadow = sub.add_parser("shadow-index", help="F5 HyDE read-only flagging")
+    shadow_sub = p_shadow.add_subparsers(dest="action", required=True)
+    p_sa = shadow_sub.add_parser("audit", help="Sample triples and flag unsupported ones")
+    p_sa.add_argument("--n-samples", type=int, default=20)
+    p_sa.add_argument("--n-results", type=int, default=5)
+    p_sl = shadow_sub.add_parser("list-flagged", help="Show recent flagged triples")
+    p_sl.add_argument("--limit", type=int, default=20)
+
     args = parser.parse_args()
     _apply_backend_arg(args)
 
@@ -4073,7 +4152,13 @@ def main():
         "hallways": cmd_hallways,
         "status": cmd_status,
         "update": cmd_update,
+
+        "janitor": cmd_janitor,
+        "shadow-index": cmd_shadow_index,
     }
+    if args.command == "rebuild-index":
+        _cmd_rebuild_index(args)
+        return
     dispatch[args.command](args)
 
 
