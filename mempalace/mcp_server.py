@@ -101,6 +101,18 @@ from .collision_scan import assert_no_collisions  # noqa: E402
 from .ids import ID_RECIPE, make_drawer_id_from_content  # noqa: E402
 
 
+# F8/Phase-B: model name stamped into documents-table provenance and drawer
+# metadata. Matches EmbeddinggemmaONNX.name() ("embeddinggemma_300m"). Plain
+# string only; the legacy Ollama embed shim is intentionally gone -- eg-384
+# embeds via the ChromaDB embedding function.
+_DEFAULT_EMBED_MODEL = "embeddinggemma_300m"
+
+# I6: content validation + per-process MCP session id for write provenance (2C).
+import uuid as _uuid
+from .content_validator import validate_content, quarantine_content, wrap_long_lines
+_MCP_SESSION_ID = _uuid.uuid4().hex[:12]
+
+
 def _init_logging() -> None:
     """Root-logger init: always stderr, optionally append to ``MEMPALACE_LOG_FILE``.
 
@@ -1517,6 +1529,17 @@ def tool_status():
         logger.exception("tool_status metadata fetch failed")
         result["error"] = str(e)
         result["partial"] = True
+    # I4: fixed-ID canary -- confirm known-good drawers still retrieve (exact get(),
+    # immune to HNSW/dim issues). Never raises into status.
+    try:
+        from .canary import run_canary_check
+
+        cr = run_canary_check(col)
+        result["canary"] = cr["status"]
+        if cr["status"] not in ("ok", "unseeded"):
+            result["canary_missing"] = cr.get("missing_ids", [])
+    except Exception as _canary_exc:
+        result["canary"] = "error: %s" % _canary_exc
     return result
 
 
@@ -2167,6 +2190,14 @@ def tool_add_drawer(
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
+    # I6(2A): block injection/exfil content; quarantine + return, never raise.
+    # Wrap a copy for validation only -- do not mutate content before storage.
+    _cv_ok, _cv_reason = validate_content(wrap_long_lines(content), source="add_drawer:%s" % added_by)
+    if not _cv_ok:
+        _qpath = quarantine_content(content, _cv_reason, source="add_drawer:%s" % added_by)
+        logger.warning("[content-validator] add_drawer quarantined (%s): %s", _cv_reason, _qpath)
+        return {"success": False, "reason": "quarantined", "detail": _cv_reason, "quarantine_path": _qpath}
+
     col = _get_collection(create=True)
     if not col:
         return _collection_error_or_no_palace()
@@ -2193,6 +2224,9 @@ def tool_add_drawer(
         "added_by": added_by,
         "filed_at": datetime.now().isoformat(),
         "id_recipe": ID_RECIPE,
+        "embedding_model": _DEFAULT_EMBED_MODEL,
+        "source": "mcp",
+        "session_id": _MCP_SESSION_ID,
     }
 
     # Idempotency. Three cases to detect a prior committed write:
@@ -2232,6 +2266,17 @@ def tool_add_drawer(
                 )
             _metadata_cache = None
             logger.info(f"Filed drawer: {drawer_id} → {wing}/{room}")
+            try:
+                _get_kg().upsert_document(
+                    drawer_id=drawer_id,
+                    content=content,
+                    wing=wing,
+                    room=room,
+                    source_file=source_file or "",
+                    embedding_model=_DEFAULT_EMBED_MODEL,
+                )
+            except Exception as _doc_err:
+                logger.warning("Document store write failed for %s: %s", drawer_id, _doc_err)
             return {
                 "success": True,
                 "drawer_id": drawer_id,
@@ -2267,6 +2312,17 @@ def tool_add_drawer(
             )
         _metadata_cache = None
         logger.info(f"Filed drawer: {drawer_id} → {wing}/{room} ({len(chunk_ids)} chunks)")
+        try:
+            _get_kg().upsert_document(
+                drawer_id=drawer_id,
+                content=content,
+                wing=wing,
+                room=room,
+                source_file=source_file or "",
+                embedding_model=_DEFAULT_EMBED_MODEL,
+            )
+        except Exception as _doc_err:
+            logger.warning("Document store write failed for %s: %s", drawer_id, _doc_err)
         return {
             "success": True,
             "drawer_id": drawer_id,
@@ -2303,6 +2359,10 @@ def tool_delete_drawer(drawer_id: str):
         )
 
         col.delete(ids=record["ids"])
+        try:
+            _get_kg().delete_document(drawer_id)
+        except Exception as _doc_err:
+            logger.warning("Document store delete failed for %s: %s", drawer_id, _doc_err)
         _metadata_cache = None
 
         logger.info("Deleted drawer: %s (%s rows)", drawer_id, len(record["ids"]))
@@ -2848,6 +2908,19 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
             if stale_ids:
                 col.delete(ids=stale_ids)
 
+            if content is not None:
+                try:
+                    _get_kg().upsert_document(
+                        drawer_id=drawer_id,
+                        content=new_doc,
+                        wing=new_meta.get("wing", ""),
+                        room=new_meta.get("room", ""),
+                        source_file=new_meta.get("source_file", ""),
+                        embedding_model=new_meta.get("embedding_model", _DEFAULT_EMBED_MODEL),
+                    )
+                except Exception as _doc_err:
+                    logger.warning("Document store update failed for %s: %s", drawer_id, _doc_err)
+
             _metadata_cache = None
 
             logger.info("Updated drawer: %s (%s rows)", drawer_id, len(chunk_ids))
@@ -2867,6 +2940,18 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
         update_kwargs["metadatas"] = [new_meta]
 
         col.update(**update_kwargs)
+        if content is not None:
+            try:
+                _get_kg().upsert_document(
+                    drawer_id=drawer_id,
+                    content=new_doc,
+                    wing=new_meta.get("wing", ""),
+                    room=new_meta.get("room", ""),
+                    source_file=new_meta.get("source_file", ""),
+                    embedding_model=new_meta.get("embedding_model", _DEFAULT_EMBED_MODEL),
+                )
+            except Exception as _doc_err:
+                logger.warning("Document store update failed for %s: %s", drawer_id, _doc_err)
         _metadata_cache = None
 
         logger.info("Updated drawer: %s", drawer_id)
@@ -3032,6 +3117,16 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
+    # I6.3+F: validate against a wrapped copy so the per-line validator accepts dense
+    # lines, but keep the original entry for storage (wrapping would insert newlines
+    # that break verbatim round-trip — same fix applied to tool_add_drawer in PATCH F).
+    # I6(1): block injection/exfil content in diary entries; quarantine + return, never raise.
+    _cv_ok, _cv_reason = validate_content(wrap_long_lines(entry), source="diary_write:%s" % agent_name)
+    if not _cv_ok:
+        _qpath = quarantine_content(entry, _cv_reason, source="diary_write:%s" % agent_name)
+        logger.warning("[content-validator] diary quarantined (%s): %s", _cv_reason, _qpath)
+        return {"success": False, "reason": "quarantined", "detail": _cv_reason, "quarantine_path": _qpath}
+
     if wing:
         wing = sanitize_name(wing)
     else:
@@ -3071,6 +3166,8 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
             "agent": agent_name,
             "filed_at": now.isoformat(),
             "date": now.strftime("%Y-%m-%d"),
+            "source": "mcp",
+            "session_id": _MCP_SESSION_ID,
         }
         chunk_size = _config.chunk_size
         if len(entry) <= chunk_size:
