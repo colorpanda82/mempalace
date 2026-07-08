@@ -38,6 +38,20 @@ WRAPPED_TOOLS = [
     "tool_diary_read",
 ]
 
+# Real stdout, captured at module import — which happens during cli.py's
+# subparser setup, BEFORE mcp_server is ever imported. Importing mcp_server can
+# mutate sys.stdout (it rebinds/reconfigures streams), so we never trust
+# sys.stdout for our own output. All JSON goes through _out() to this handle,
+# guaranteeing it lands on the process's real stdout (fd1) regardless of what
+# the redirect or the library does to sys.stdout.
+_REAL_STDOUT = sys.stdout
+
+
+def _out(text):
+    """Write one line to the real stdout (fd1), immune to sys.stdout mutation."""
+    _REAL_STDOUT.write(text + "\n")
+    _REAL_STDOUT.flush()
+
 
 # --------------------------------------------------------------------------
 # Palace resolution + server binding
@@ -122,9 +136,9 @@ def _emit(result, args):
     """Print result (JSON when --json, else a one-line summary) and return an
     exit code: 0 on success, 1 when the wrapped tool reported an error."""
     if getattr(args, "json", False):
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        _out(json.dumps(result, ensure_ascii=False, indent=2))
     else:
-        print(_summary(result))
+        _out(_summary(result))
     return 1 if _is_error(result) else 0
 
 
@@ -222,7 +236,7 @@ def _h_search_json(args):
         source_file=args.source_file,
         max_distance=args.max_distance,
     )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    _out(json.dumps(result, ensure_ascii=False, indent=2))
     return 1 if _is_error(result) else 0
 
 
@@ -234,7 +248,7 @@ def _h_ws_selftest(args):
         with _stdout_to_stderr():
             from mempalace import mcp_server as m
     except Exception as e:  # noqa: BLE001 - report import failure as JSON
-        print(json.dumps(
+        _out(json.dumps(
             {"ok": False, "present": [], "missing": list(WRAPPED_TOOLS),
              "import_error": str(e)},
             ensure_ascii=False, indent=2,
@@ -243,7 +257,7 @@ def _h_ws_selftest(args):
     present, missing = [], []
     for name in WRAPPED_TOOLS:
         (present if hasattr(m, name) else missing).append(name)
-    print(json.dumps(
+    _out(json.dumps(
         {"ok": not missing, "present": present, "missing": missing},
         ensure_ascii=False, indent=2,
     ))
