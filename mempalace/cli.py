@@ -1567,6 +1567,8 @@ def main():
     )
 
     sub = parser.add_subparsers(dest="command")
+    from .cli_workspace import register as _ws_register  # ws-hybrid-hook
+    _ws_register(sub)  # ws-hybrid-hook
 
     # init
     p_init = sub.add_parser("init", help="Detect rooms from your folder structure")
@@ -2072,6 +2074,10 @@ def main():
         return
 
     # Handle two-level subcommands
+    from .cli_workspace import maybe_dispatch as _ws_maybe_dispatch  # ws-hybrid-hook
+    _ws_rc = _ws_maybe_dispatch(args)  # ws-hybrid-hook
+    if _ws_rc is not None:  # ws-hybrid-hook
+        return _ws_rc  # ws-hybrid-hook
     if args.command == "hook":
         if not getattr(args, "hook_action", None):
             p_hook.print_help()
