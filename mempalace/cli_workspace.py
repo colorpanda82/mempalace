@@ -39,16 +39,22 @@ WRAPPED_TOOLS = [
 ]
 
 # Real stdout, captured at module import — which happens during cli.py's
-# subparser setup, BEFORE mcp_server is ever imported. Importing mcp_server can
-# mutate sys.stdout (it rebinds/reconfigures streams), so we never trust
-# sys.stdout for our own output. All JSON goes through _out() to this handle,
-# guaranteeing it lands on the process's real stdout (fd1) regardless of what
-# the redirect or the library does to sys.stdout.
-_REAL_STDOUT = sys.stdout
+# subparser setup, BEFORE mcp_server is ever imported. mcp_server is an MCP
+# stdio server: at import it redirects file descriptor 1 -> 2 (an OS-level
+# dup2) so stray library prints can't corrupt its JSON-RPC channel. A Python
+# sys.stdout handle cannot survive that. So we DUPLICATE fd 1 here, before the
+# redirect, giving us an independent fd to the process's real stdout; all our
+# JSON is written to it via _out() and lands on real stdout regardless of what
+# mcp_server does to fd 1.
+try:
+    _REAL_STDOUT = os.fdopen(os.dup(sys.stdout.fileno()), "w", closefd=True)
+except (OSError, ValueError, AttributeError):
+    # No real fd (e.g. captured/wrapped stdout in a test harness) — fall back.
+    _REAL_STDOUT = sys.stdout
 
 
 def _out(text):
-    """Write one line to the real stdout (fd1), immune to sys.stdout mutation."""
+    """Write one line to the duplicated real stdout, immune to fd-1 redirects."""
     _REAL_STDOUT.write(text + "\n")
     _REAL_STDOUT.flush()
 
