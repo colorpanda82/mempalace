@@ -23,6 +23,7 @@ Public surface: ``register(sub)`` and ``maybe_dispatch(args)``.
 import json
 import os
 import sys
+import contextlib
 
 # The set of upstream tool_* functions this module depends on. ws-selftest
 # checks all of these exist as attributes on mcp_server after an upstream rebase.
@@ -56,6 +57,32 @@ def _server(args):
     os.environ["MEMPALACE_PALACE_PATH"] = _resolve_palace(args)
     from mempalace import mcp_server
     return mcp_server
+
+
+@contextlib.contextmanager
+def _stdout_to_stderr():
+    """Redirect stdout to stderr for the duration of a wrapped call.
+
+    The underlying library emits diagnostics to stdout (embedder init, HNSW
+    flush-lag notes, 'Filed drawer:' / 'Diary entry:' lines, model-download
+    messages). Without this, those lines contaminate our JSON and break
+    ``mempalace <verb> --json | jq``. Only the final ``json.dumps(...)`` — printed
+    after this context exits — reaches real stdout, keeping --json pipe-clean.
+    """
+    old = sys.stdout
+    sys.stdout = sys.stderr
+    try:
+        yield
+    finally:
+        sys.stdout = old
+
+
+def _invoke(args, fn_name, **kwargs):
+    """Bind the palace, import mcp_server, and call one tool_* function with
+    stdout isolated to stderr so only our JSON reaches stdout."""
+    with _stdout_to_stderr():
+        m = _server(args)
+        return getattr(m, fn_name)(**kwargs)
 
 
 # --------------------------------------------------------------------------
@@ -106,8 +133,8 @@ def _emit(result, args):
 # --------------------------------------------------------------------------
 
 def _h_kg_add(args):
-    m = _server(args)
-    result = m.tool_kg_add(
+    result = _invoke(
+        args, "tool_kg_add",
         subject=args.subject,
         predicate=args.predicate,
         object=args.object,
@@ -121,8 +148,8 @@ def _h_kg_add(args):
 
 
 def _h_kg_query(args):
-    m = _server(args)
-    result = m.tool_kg_query(
+    result = _invoke(
+        args, "tool_kg_query",
         entity=args.entity,
         as_of=args.as_of,
         direction=args.direction,
@@ -131,8 +158,8 @@ def _h_kg_query(args):
 
 
 def _h_kg_invalidate(args):
-    m = _server(args)
-    result = m.tool_kg_invalidate(
+    result = _invoke(
+        args, "tool_kg_invalidate",
         subject=args.subject,
         predicate=args.predicate,
         object=args.object,
@@ -142,8 +169,8 @@ def _h_kg_invalidate(args):
 
 
 def _h_add_drawer(args):
-    m = _server(args)
-    result = m.tool_add_drawer(
+    result = _invoke(
+        args, "tool_add_drawer",
         wing=args.wing,
         room=args.room,
         content=args.content,
@@ -154,8 +181,8 @@ def _h_add_drawer(args):
 
 
 def _h_check_duplicate(args):
-    m = _server(args)
-    result = m.tool_check_duplicate(
+    result = _invoke(
+        args, "tool_check_duplicate",
         content=args.content,
         threshold=args.threshold,
     )
@@ -163,8 +190,8 @@ def _h_check_duplicate(args):
 
 
 def _h_diary_write(args):
-    m = _server(args)
-    result = m.tool_diary_write(
+    result = _invoke(
+        args, "tool_diary_write",
         agent_name=args.agent_name,
         entry=args.entry,
         topic=args.topic,
@@ -174,8 +201,8 @@ def _h_diary_write(args):
 
 
 def _h_diary_read(args):
-    m = _server(args)
-    result = m.tool_diary_read(
+    result = _invoke(
+        args, "tool_diary_read",
         agent_name=args.agent_name,
         last_n=args.last_n,
         wing=args.wing,
@@ -186,8 +213,8 @@ def _h_diary_read(args):
 def _h_search_json(args):
     # This is the parseable-search verb: it ALWAYS emits JSON regardless of
     # the --json flag, so downstream tooling can rely on the output shape.
-    m = _server(args)
-    result = m.tool_search(
+    result = _invoke(
+        args, "tool_search",
         query=args.query,
         limit=args.limit,
         wing=args.wing,
@@ -204,7 +231,8 @@ def _h_ws_selftest(args):
     # tool_* name still exists on mcp_server; a missing name means an upstream
     # rename broke this module.
     try:
-        from mempalace import mcp_server as m
+        with _stdout_to_stderr():
+            from mempalace import mcp_server as m
     except Exception as e:  # noqa: BLE001 - report import failure as JSON
         print(json.dumps(
             {"ok": False, "present": [], "missing": list(WRAPPED_TOOLS),
