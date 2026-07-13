@@ -801,6 +801,18 @@ def _get_client():
         _refresh_vector_disabled_flag()
         if inode_changed or mtime_changed:
             ChromaBackend._quarantined_paths.discard(_config.palace_path)
+            # Another process wrote the palace. Rebuilding the client is NOT
+            # sufficient: chromadb caches its System -- and therefore the live
+            # in-memory HNSW segment -- keyed by path, so make_client() hands
+            # back the SAME stale segment. That segment keeps its outdated view
+            # of the index and, on its next _persist(), writes it over the
+            # on-disk index, silently destroying records other writers had
+            # already indexed (index count goes BACKWARDS; reproduced with a
+            # long-lived writer + a peer session). See upstream #1963 and
+            # chroma-core/chroma#6975. _force_chroma_cache_reset() drops the
+            # shared System cache, the backend client cache, and closes the
+            # stale handle, so the segment is reloaded from disk.
+            _force_chroma_cache_reset()
         _client_cache = ChromaBackend.make_client(_config.palace_path)
         _collection_cache = None
         _collection_cache_backend = None
