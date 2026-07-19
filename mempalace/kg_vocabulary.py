@@ -56,6 +56,7 @@ __all__ = [
     "PolicyError",
     "VOCABULARY_VERSION",
     "resolve_predicate",
+    "resolve_predicate_for_lookup",
 ]
 
 VOCABULARY_VERSION = 1
@@ -224,7 +225,7 @@ def resolve_predicate(predicate, policy=None):
         # CANONICAL and forgetting MAPPING produces the nonsense error
         # "'uses' is not in the canonical vocabulary. Did you mean 'uses'?"
         if key in CANONICAL:
-            return key, "keep", ""
+            return key, "keep", _normalization_note(predicate, key)
         if policy == "warn":
             return (
                 key,
@@ -244,7 +245,7 @@ def resolve_predicate(predicate, policy=None):
     action = rule["action"]
 
     if action == "keep":
-        return key, "keep", ""
+        return key, "keep", _normalization_note(predicate, key)
 
     if action == "remap":
         target = rule["to"]
@@ -263,3 +264,55 @@ def resolve_predicate(predicate, policy=None):
         )
 
     raise ValueError(f"vocabulary entry for {key!r} has unknown action {action!r}")
+
+
+def _normalization_note(submitted, stored):
+    """Note for a case/whitespace-only rewrite.
+
+    A canonical predicate submitted as ``IS_A`` is STORED as ``is_a``. That is
+    still a rewrite, and a caller who cannot see it cannot reconcile what it
+    sent with what the graph holds. Returning "" here (the original behaviour)
+    meant the WAL recorded ``predicate_submitted`` while the response said
+    nothing -- the two disagreed about whether anything happened.
+    """
+    if submitted is None or not isinstance(submitted, str):
+        return ""
+    return (
+        f"predicate {submitted!r} normalized to {stored!r}"
+        if submitted != stored
+        else ""
+    )
+
+
+def resolve_predicate_for_lookup(predicate):
+    """Resolve a predicate for ADDRESSING EXISTING ROWS, never for writing.
+
+    Returns ``(resolved, note)``. Applies keep/remap so a lookup matches what
+    ``tool_kg_add`` actually stored, and **never raises on drop or unknown**.
+
+    Why this is not just ``resolve_predicate(policy="warn")``: the write path
+    exists to keep bad predicates OUT of the graph, but a lookup addresses
+    predicates that are already IN it. Refusing ``status`` here would make
+    legacy session-state triples -- written before the write gate existed --
+    permanently un-invalidatable, locking the cleanup path behind the guard
+    meant to prevent the mess.
+
+    Caveat worth knowing: a triple written with an ALIAS before the write gate
+    existed is stored under the alias, so remapping the lookup will miss it.
+    That is why the caller must surface a zero-match result instead of
+    reporting success.
+    """
+    if not isinstance(predicate, str):
+        raise TypeError(f"predicate must be a string, got {type(predicate).__name__}")
+    key = predicate.strip().lower()
+    if not key:
+        raise ValueError("predicate must be a non-empty string")
+
+    rule = MAPPING.get(key)
+    if rule is not None and rule["action"] == "remap":
+        target = rule["to"]
+        return target, (
+            f"predicate {key!r} resolved to {target!r} for lookup "
+            f"per canonical vocabulary v{VOCABULARY_VERSION}"
+        )
+    return key, _normalization_note(predicate, key)

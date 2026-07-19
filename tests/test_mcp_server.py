@@ -4005,11 +4005,21 @@ class TestKGTools:
 
         # Caller-omitted date resolves to today's ISO date — never the
         # literal string "today" the buggy implementation used to return.
+        #
+        # Was ("Max", "loves", "Chess") until 2026-07-19 — a triple the
+        # seeded_kg fixture never creates ("loves" is not seeded, and the
+        # object is "chess", lowercase). It passed only because invalidate
+        # reported success for an UPDATE that matched zero rows. Now that a
+        # zero-match invalidate correctly returns success=False with no
+        # "ended" key, the test must target a fact that exists. Intent is
+        # unchanged: an omitted date resolves to today's ISO date.
         implicit = tool_kg_invalidate(
             subject="Max",
-            predicate="loves",
-            object="Chess",
+            predicate="does",
+            object="chess",
         )
+        assert implicit["success"] is True, implicit
+        assert implicit["matched"] == 1
         assert implicit["ended"] != "today"
         assert implicit["ended"] == _date.today().isoformat()
 

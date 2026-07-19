@@ -118,7 +118,7 @@ _DEFAULT_EMBED_MODEL = "embeddinggemma_300m"
 # I6: content validation + per-process MCP session id for write provenance (2C).
 import uuid as _uuid
 from .content_validator import validate_content, quarantine_content, wrap_long_lines
-from .kg_vocabulary import resolve_predicate
+from .kg_vocabulary import resolve_predicate, resolve_predicate_for_lookup
 _MCP_SESSION_ID = _uuid.uuid4().hex[:12]
 
 
@@ -4188,6 +4188,8 @@ def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = N
     try:
         subject = sanitize_kg_value(subject, "subject")
         predicate = sanitize_name(predicate, "predicate")
+        submitted_predicate = predicate
+        predicate, vocab_note = resolve_predicate_for_lookup(predicate)
         object = sanitize_kg_value(object, "object")
         ended = sanitize_iso_temporal(ended, "ended")
     except ValueError as e:
@@ -4195,22 +4197,44 @@ def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = N
 
     resolved_ended = ended or date.today().isoformat()
 
-    _wal_log(
-        "kg_invalidate",
-        {
-            "subject": subject,
-            "predicate": predicate,
-            "object": object,
-            "ended": resolved_ended,
-        },
-    )
+    wal_payload = {
+        "subject": subject,
+        "predicate": predicate,
+        "object": object,
+        "ended": resolved_ended,
+    }
+    if predicate != submitted_predicate:
+        wal_payload["predicate_submitted"] = submitted_predicate
+    _wal_log("kg_invalidate", wal_payload)
 
-    _call_kg(lambda kg: kg.invalidate(subject, predicate, object, ended=resolved_ended))
-    return {
+    matched = _call_kg(
+        lambda kg: kg.invalidate(subject, predicate, object, ended=resolved_ended)
+    )
+    matched = int(matched or 0)
+
+    if matched == 0:
+        # Do NOT report success. The UPDATE matched nothing, so the caller's
+        # fact is still live; saying "ended" would be a silent false success.
+        err = (
+            f"no active fact matched {subject!r} -> {predicate!r} -> {object!r}; "
+            "nothing was invalidated"
+        )
+        if predicate != submitted_predicate:
+            err += (
+                f" (submitted predicate {submitted_predicate!r} resolved to "
+                f"{predicate!r}; a fact stored under the original alias would not match)"
+            )
+        return {"success": False, "error": err, "matched": 0}
+
+    result = {
         "success": True,
         "fact": f"{subject} → {predicate} → {object}",
         "ended": resolved_ended,
+        "matched": matched,
     }
+    if vocab_note:
+        result["note"] = vocab_note
+    return result
 
 
 def tool_kg_supersede(
