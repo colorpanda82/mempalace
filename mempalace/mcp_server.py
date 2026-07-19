@@ -110,6 +110,7 @@ _DEFAULT_EMBED_MODEL = "embeddinggemma_300m"
 # I6: content validation + per-process MCP session id for write provenance (2C).
 import uuid as _uuid
 from .content_validator import validate_content, quarantine_content, wrap_long_lines
+from .kg_vocabulary import resolve_predicate
 _MCP_SESSION_ID = _uuid.uuid4().hex[:12]
 
 
@@ -3018,25 +3019,27 @@ def tool_kg_add(
     try:
         subject = sanitize_kg_value(subject, "subject")
         predicate = sanitize_name(predicate, "predicate")
+        submitted_predicate = predicate
+        predicate, _vocab_action, vocab_note = resolve_predicate(predicate)
         object = sanitize_kg_value(object, "object")
         valid_from = sanitize_iso_temporal(valid_from, "valid_from")
         valid_to = sanitize_iso_temporal(valid_to, "valid_to")
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
-    _wal_log(
-        "kg_add",
-        {
-            "subject": subject,
-            "predicate": predicate,
-            "object": object,
-            "valid_from": valid_from,
-            "valid_to": valid_to,
-            "source_closet": source_closet,
-            "source_file": source_file,
-            "source_drawer_id": source_drawer_id,
-        },
-    )
+    wal_payload = {
+        "subject": subject,
+        "predicate": predicate,
+        "object": object,
+        "valid_from": valid_from,
+        "valid_to": valid_to,
+        "source_closet": source_closet,
+        "source_file": source_file,
+        "source_drawer_id": source_drawer_id,
+    }
+    if predicate != submitted_predicate:
+        wal_payload["predicate_submitted"] = submitted_predicate
+    _wal_log("kg_add", wal_payload)
 
     triple_id = _call_kg(
         lambda kg: kg.add_triple(
@@ -3050,7 +3053,14 @@ def tool_kg_add(
             source_drawer_id=source_drawer_id,
         )
     )
-    return {"success": True, "triple_id": triple_id, "fact": f"{subject} → {predicate} → {object}"}
+    result = {
+        "success": True,
+        "triple_id": triple_id,
+        "fact": f"{subject} → {predicate} → {object}",
+    }
+    if vocab_note:
+        result["note"] = vocab_note
+    return result
 
 
 def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = None):
