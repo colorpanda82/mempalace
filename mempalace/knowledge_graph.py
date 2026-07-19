@@ -483,11 +483,15 @@ class KnowledgeGraph:
                             "an inverted interval would be invisible to every KG query"
                         )
 
-                conn.execute(
+                cur = conn.execute(
                     "UPDATE triples SET valid_to=? "
                     "WHERE subject=? AND predicate=? AND object=? AND valid_to IS NULL",
                     (ended, sub_id, pred, obj_id),
                 )
+                # Return the match count so callers can tell "ended it" from
+                # "matched nothing". Previously this returned None and a
+                # no-op invalidate was indistinguishable from a real one.
+                return int(cur.rowcount or 0)
 
     # ── Query operations ──────────────────────────────────────────────────
 
