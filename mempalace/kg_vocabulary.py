@@ -24,6 +24,13 @@ Policy
 unknown     rejected under ``strict`` with a nearest-match suggestion,
             admitted with a note under ``warn``
 
+The three policies, weakest guard last:
+
+``strict``      unknown predicates refused; both kinds of drop refused
+``warn``        (default) unknown admitted; both kinds of drop refused
+``permissive``  unknown admitted; ``modeling`` drops admitted with a note;
+                ``session_state`` drops STILL refused, under every policy
+
 Policy comes from the ``MEMPALACE_PREDICATE_POLICY`` environment variable and
 defaults to ``warn``.
 
@@ -133,27 +140,27 @@ MAPPING = {
     "covers": {"action": "remap", "to": "implements"},
     "tracks_budgets": {"action": "remap", "to": "used_for"},
     # -- drop: banned ------------------------------------------------------
-    "needs_from_cristian": {"action": "drop", "reason": "banned session-state"},
-    "completed_tonight": {"action": "drop", "reason": "banned session-state"},
-    "draft_at": {"action": "drop", "reason": "banned session-state"},
-    "in_queue": {"action": "drop", "reason": "banned session-state"},
-    "in_jarvis_queue": {"action": "drop", "reason": "banned session-state"},
-    "manual_step_due": {"action": "drop", "reason": "banned session-state"},
-    "pending_dispatch": {"action": "drop", "reason": "banned session-state"},
-    "processing": {"action": "drop", "reason": "banned session-state"},
-    "status": {"action": "drop", "reason": "session-state (rots)"},
-    "pipeline_summary": {"action": "drop", "reason": "non-relation; belongs in a drawer"},
-    "qualifiers": {"action": "drop", "reason": "meta/non-relation"},
-    "rule": {"action": "drop", "reason": "non-relation; belongs in a drawer"},
-    "related_to": {"action": "drop", "reason": "too generic to be queryable"},
-    "has_levels": {"action": "drop", "reason": "attribute, not a relation"},
+    "needs_from_cristian": {"action": "drop", "reason": "banned session-state", "reason_class": "session_state"},
+    "completed_tonight": {"action": "drop", "reason": "banned session-state", "reason_class": "session_state"},
+    "draft_at": {"action": "drop", "reason": "banned session-state", "reason_class": "session_state"},
+    "in_queue": {"action": "drop", "reason": "banned session-state", "reason_class": "session_state"},
+    "in_jarvis_queue": {"action": "drop", "reason": "banned session-state", "reason_class": "session_state"},
+    "manual_step_due": {"action": "drop", "reason": "banned session-state", "reason_class": "session_state"},
+    "pending_dispatch": {"action": "drop", "reason": "banned session-state", "reason_class": "session_state"},
+    "processing": {"action": "drop", "reason": "banned session-state", "reason_class": "session_state"},
+    "status": {"action": "drop", "reason": "session-state (rots)", "reason_class": "session_state"},
+    "pipeline_summary": {"action": "drop", "reason": "non-relation; belongs in a drawer", "reason_class": "modeling"},
+    "qualifiers": {"action": "drop", "reason": "meta/non-relation", "reason_class": "modeling"},
+    "rule": {"action": "drop", "reason": "non-relation; belongs in a drawer", "reason_class": "modeling"},
+    "related_to": {"action": "drop", "reason": "too generic to be queryable", "reason_class": "modeling"},
+    "has_levels": {"action": "drop", "reason": "attribute, not a relation", "reason_class": "modeling"},
 }
 
 VOCABULARY_FILE = "_manager/kg-schema/predicate_map_v1.json"
 
 POLICY_ENV_VAR = "MEMPALACE_PREDICATE_POLICY"
 DEFAULT_POLICY = "warn"
-VALID_POLICIES = ("strict", "warn")
+VALID_POLICIES = ("strict", "warn", "permissive")
 
 
 class PolicyError(ValueError):
@@ -226,7 +233,12 @@ def resolve_predicate(predicate, policy=None):
         # "'uses' is not in the canonical vocabulary. Did you mean 'uses'?"
         if key in CANONICAL:
             return key, "keep", _normalization_note(predicate, key)
-        if policy == "warn":
+        # permissive is a WEAKER guard than warn, never a different one. Testing
+        # only for "warn" here made an unknown predicate refused under permissive
+        # but admitted under the default -- a policy that is stricter than the
+        # thing it relaxes. Caught by printing the full policy x predicate matrix
+        # rather than spot-checking one cell.
+        if policy in ("warn", "permissive"):
             return (
                 key,
                 "unknown",
@@ -257,6 +269,27 @@ def resolve_predicate(predicate, policy=None):
         )
 
     if action == "drop":
+        # Two kinds of drop, and only one is universal.
+        #
+        # session_state: 'status', 'in_queue', 'processing' and friends record what
+        # is true RIGHT NOW. They are false tomorrow and rot any graph, in any
+        # deployment. Refused under every policy, permissive included.
+        #
+        # modeling: 'related_to' (too generic to be queryable), 'rule',
+        # 'has_levels', 'qualifiers', 'pipeline_summary'. These are opinions about
+        # what belongs in a graph rather than a drawer. Good opinions -- they stay
+        # the default -- but they ARE opinions, and until now no policy could
+        # disable them. That was the strict-by-default mistake surviving in one
+        # corner after being corrected everywhere else (independent review,
+        # 2026-07-19). permissive admits them, with a note, for a deployment that
+        # models differently. The DEFAULT is unchanged.
+        if policy == "permissive" and rule.get("reason_class") == "modeling":
+            return (
+                key,
+                "unknown",
+                f"predicate {key!r} is discouraged ({rule['reason']}) but admitted "
+                f"because {POLICY_ENV_VAR}=permissive",
+            )
         raise PolicyError(
             f"predicate {key!r} is not allowed: {rule['reason']}. "
             f"Facts of this kind belong in a drawer, not the knowledge graph. "

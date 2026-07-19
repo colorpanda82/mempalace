@@ -308,3 +308,122 @@ def test_env_var_warn_still_rejects_banned(monkeypatch):
     monkeypatch.setenv("MEMPALACE_PREDICATE_POLICY", "warn")
     with pytest.raises(PolicyError):
         resolve_predicate("status")
+
+
+# --------------------------------------------------------------------------
+# Independent review 2026-07-19: the drop list was unopt-outable. Session-state
+# bans are universal; modeling bans are opinions. Only the latter get a hatch,
+# and the DEFAULT is unchanged.
+# --------------------------------------------------------------------------
+
+
+SESSION_STATE_DROPS = [
+    "status", "in_queue", "in_jarvis_queue", "processing", "pending_dispatch",
+    "completed_tonight", "needs_from_cristian", "manual_step_due", "draft_at",
+]
+MODELING_DROPS = ["related_to", "rule", "has_levels", "qualifiers", "pipeline_summary"]
+
+
+def test_every_drop_is_classified():
+    for pred, r in MAPPING.items():
+        if r["action"] == "drop":
+            assert r.get("reason_class") in {"session_state", "modeling"}, pred
+
+
+def test_drop_classes_partition_as_expected():
+    got_ss = {p for p, r in MAPPING.items()
+              if r["action"] == "drop" and r.get("reason_class") == "session_state"}
+    got_md = {p for p, r in MAPPING.items()
+              if r["action"] == "drop" and r.get("reason_class") == "modeling"}
+    assert got_ss == set(SESSION_STATE_DROPS)
+    assert got_md == set(MODELING_DROPS)
+
+
+@pytest.mark.parametrize("predicate", SESSION_STATE_DROPS)
+@pytest.mark.parametrize("policy", ["strict", "warn", "permissive"])
+def test_session_state_refused_under_every_policy(predicate, policy):
+    """The universal half. No escape hatch, by design."""
+    with pytest.raises(PolicyError):
+        resolve_predicate(predicate, policy=policy)
+
+
+@pytest.mark.parametrize("predicate", MODELING_DROPS)
+@pytest.mark.parametrize("policy", ["strict", "warn"])
+def test_modeling_drops_still_refused_by_default(predicate, policy):
+    """Default behaviour UNCHANGED: warn is the default and still refuses."""
+    with pytest.raises(PolicyError):
+        resolve_predicate(predicate, policy=policy)
+
+
+@pytest.mark.parametrize("predicate", MODELING_DROPS)
+def test_modeling_drops_admitted_under_permissive(predicate):
+    resolved, action, note = resolve_predicate(predicate, policy="permissive")
+    assert resolved == predicate
+    assert action == "unknown"
+    assert "permissive" in note
+
+
+def test_permissive_still_normalizes_aliases():
+    resolved, action, _ = resolve_predicate("runs_on", policy="permissive")
+    assert resolved == "deployed_on"
+    assert action == "remap"
+
+
+def test_permissive_selectable_by_env(monkeypatch):
+    monkeypatch.setenv("MEMPALACE_PREDICATE_POLICY", "permissive")
+    _r, action, _n = resolve_predicate("related_to")
+    assert action == "unknown"
+    with pytest.raises(PolicyError):
+        resolve_predicate("status")
+
+
+def test_default_is_still_warn_not_permissive():
+    """Guard against the hatch silently becoming the default."""
+    with pytest.raises(PolicyError):
+        resolve_predicate("related_to")
+
+
+def test_permissive_is_never_stricter_than_warn():
+    """The invariant the policy names imply, pinned.
+
+    permissive relaxes warn; it must never refuse something warn admits. The
+    first implementation tested `policy == "warn"` in the unknown branch, so an
+    unrecognized predicate was refused under permissive and admitted under the
+    default. Spot-checking one predicate would not have shown it; printing the
+    whole policy x predicate matrix did.
+    """
+    probes = [
+        "frobnicates", "some_new_relation", "related_to", "rule",
+        "has_levels", "runs_on", "is_a", "deployed_on",
+    ]
+    for p in probes:
+        warn_ok = permissive_ok = True
+        try:
+            resolve_predicate(p, policy="warn")
+        except PolicyError:
+            warn_ok = False
+        try:
+            resolve_predicate(p, policy="permissive")
+        except PolicyError:
+            permissive_ok = False
+        assert not (warn_ok and not permissive_ok), (
+            f"{p!r} is admitted under warn but refused under permissive"
+        )
+
+
+def test_policy_ordering_holds_for_every_mapped_predicate():
+    """Same invariant, swept across the whole vocabulary rather than a sample."""
+    for pred in list(MAPPING) + ["totally_unknown_thing"]:
+        results = {}
+        for pol in ("strict", "warn", "permissive"):
+            try:
+                resolve_predicate(pred, policy=pol)
+                results[pol] = True
+            except PolicyError:
+                results[pol] = False
+        assert not (results["warn"] and not results["permissive"]), (
+            f"{pred!r}: warn admits it, permissive refuses it"
+        )
+        assert not (results["strict"] and not results["warn"]), (
+            f"{pred!r}: strict admits it, warn refuses it"
+        )
