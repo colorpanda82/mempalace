@@ -1729,6 +1729,32 @@ def tool_search(
     )
     if isinstance(result, dict) and isinstance(result.get("results"), list):
         result["results"] = result["results"][:limit]
+        # Lexical-support signal. Vector distance carries NO relevance
+        # information on this corpus -- measured 2026-07-22, correct hits
+        # span 0.2343-0.2952 while junk spans 0.2848-0.3777, and a nonsense
+        # query once retrieved a bare newline at 0.1675, beating every
+        # correct hit. So a distance threshold cannot express confidence.
+        # BM25 overlap can: over 16 probe queries, all 10 with a correct
+        # answer scored > 0 (weakest 2.95) and 5 of 6 with no correct answer
+        # scored exactly 0.
+        # Annotated, NOT filtered: the sample is small and every good query
+        # in it shared vocabulary with its target. A pure-synonym query could
+        # legitimately score 0, and dropping those results would destroy
+        # recall silently. A flag cannot -- worst case it mislabels a good
+        # result while still returning it.
+        _lex = max(
+            (float(h.get("bm25_score") or 0.0) for h in result["results"]),
+            default=0.0,
+        )
+        result["lexical_support"] = round(_lex, 3)
+        result["low_confidence"] = _lex == 0.0
+        if result["low_confidence"] and result["results"]:
+            result["confidence_note"] = (
+                "No returned drawer shares any term with this query. On this "
+                "corpus that pattern usually means the subject is absent and "
+                "these are nearest-neighbour noise. Distance is not a "
+                "reliability signal here, so treat these as unverified."
+            )
     if _is_transient_index_error(result):
         # Post-bulk-write HNSW flush window (#1315): drop caches, give
         # the segment a moment to settle, retry once. Caller never sees
@@ -1762,6 +1788,32 @@ def tool_search(
         )
         if isinstance(result, dict) and isinstance(result.get("results"), list):
             result["results"] = result["results"][:limit]
+            # Lexical-support signal. Vector distance carries NO relevance
+            # information on this corpus -- measured 2026-07-22, correct hits
+            # span 0.2343-0.2952 while junk spans 0.2848-0.3777, and a nonsense
+            # query once retrieved a bare newline at 0.1675, beating every
+            # correct hit. So a distance threshold cannot express confidence.
+            # BM25 overlap can: over 16 probe queries, all 10 with a correct
+            # answer scored > 0 (weakest 2.95) and 5 of 6 with no correct answer
+            # scored exactly 0.
+            # Annotated, NOT filtered: the sample is small and every good query
+            # in it shared vocabulary with its target. A pure-synonym query could
+            # legitimately score 0, and dropping those results would destroy
+            # recall silently. A flag cannot -- worst case it mislabels a good
+            # result while still returning it.
+            _lex = max(
+                (float(h.get("bm25_score") or 0.0) for h in result["results"]),
+                default=0.0,
+            )
+            result["lexical_support"] = round(_lex, 3)
+            result["low_confidence"] = _lex == 0.0
+            if result["low_confidence"] and result["results"]:
+                result["confidence_note"] = (
+                    "No returned drawer shares any term with this query. On this "
+                    "corpus that pattern usually means the subject is absent and "
+                    "these are nearest-neighbour noise. Distance is not a "
+                    "reliability signal here, so treat these as unverified."
+                )
         if not _is_transient_index_error(result):
             result["index_recovered"] = True
     if _vector_disabled:
