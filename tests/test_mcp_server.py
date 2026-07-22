@@ -3750,16 +3750,23 @@ class TestDeleteBySource:
     @pytest.mark.xfail(
         strict=True,
         reason=(
-            "chromadb 1.5.9 defect, not a mempalace bug: chromadb/api/rust.py:440 calls "
-        "self.bindings.get(), but RustBindingsAPI exposes only _get and "
-        "_get_indexing_status -- it has no bindings attribute -- so Collection.get() "
-        "through that API raises AttributeError. This test's own mempalace assertions "
-        "(deleted == 2, closets_deleted == 2) pass; only the verification call into "
-        "chromadb raises. Deliberately not worked around in mempalace, and chromadb is "
-        "not upgraded to chase it because that venv backs the live palace and changing "
-        "the vector store version under a live store is a separate decision. "
-        "strict=True so a future chromadb fix surfaces as an unexpected pass rather "
-        "than a silently dead marker."
+            "Stale collection handle: the closets handle is captured before "
+            "tool_delete_by_source and is dead by the assertion after it. The handle is "
+            "healthy at .add() and the delete itself succeeds (deleted == 2, "
+            "closets_deleted == 2), so only the surviving handle is affected. "
+            "mcp_server._force_chroma_cache_reset() drops the client caches and calls "
+            "backend.close_palace(_config.palace_path), which would invalidate exactly such "
+            "a handle -- but it has NOT been shown to run on this path, so the mechanism is "
+            "suspected but NOT confirmed. "
+            "Explicitly NOT a chromadb defect: an instance of RustBindingsAPI does carry "
+            "bindings, and a fresh client serves col.get() for include=[] and "
+            "include=[metadatas]. Commit 4f309c4 claimed otherwise on the strength of a "
+            "dir() check against the class, which cannot see instance attributes; that "
+            "claim is retracted. No chromadb upgrade is warranted. "
+            "Next experiment for whoever picks this up: point _config.palace_path at the "
+            "probe palace before calling the reset -- three earlier probes all failed to "
+            "reproduce because they measured a palace the code was not operating on. "
+            "strict=True so an unexpected pass surfaces loudly."
         ),
     )
     def test_dry_run_reports_closet_match_count(self, monkeypatch, config, palace_path, kg):
@@ -3792,16 +3799,23 @@ class TestDeleteBySource:
     @pytest.mark.xfail(
         strict=True,
         reason=(
-            "chromadb 1.5.9 defect, not a mempalace bug: chromadb/api/rust.py:440 calls "
-        "self.bindings.get(), but RustBindingsAPI exposes only _get and "
-        "_get_indexing_status -- it has no bindings attribute -- so Collection.get() "
-        "through that API raises AttributeError. This test's own mempalace assertions "
-        "(deleted == 2, closets_deleted == 2) pass; only the verification call into "
-        "chromadb raises. Deliberately not worked around in mempalace, and chromadb is "
-        "not upgraded to chase it because that venv backs the live palace and changing "
-        "the vector store version under a live store is a separate decision. "
-        "strict=True so a future chromadb fix surfaces as an unexpected pass rather "
-        "than a silently dead marker."
+            "Stale collection handle: the closets handle is captured before "
+            "tool_delete_by_source and is dead by the assertion after it. The handle is "
+            "healthy at .add() and the delete itself succeeds (deleted == 2, "
+            "closets_deleted == 2), so only the surviving handle is affected. "
+            "mcp_server._force_chroma_cache_reset() drops the client caches and calls "
+            "backend.close_palace(_config.palace_path), which would invalidate exactly such "
+            "a handle -- but it has NOT been shown to run on this path, so the mechanism is "
+            "suspected but NOT confirmed. "
+            "Explicitly NOT a chromadb defect: an instance of RustBindingsAPI does carry "
+            "bindings, and a fresh client serves col.get() for include=[] and "
+            "include=[metadatas]. Commit 4f309c4 claimed otherwise on the strength of a "
+            "dir() check against the class, which cannot see instance attributes; that "
+            "claim is retracted. No chromadb upgrade is warranted. "
+            "Next experiment for whoever picks this up: point _config.palace_path at the "
+            "probe palace before calling the reset -- three earlier probes all failed to "
+            "reproduce because they measured a palace the code was not operating on. "
+            "strict=True so an unexpected pass surfaces loudly."
         ),
     )
     def test_commit_purges_matching_closets(self, monkeypatch, config, palace_path, kg):
