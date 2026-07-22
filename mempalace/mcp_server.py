@@ -1703,17 +1703,32 @@ def tool_search(
     # here would defeat the fallback — it constructs a PersistentClient
     # which can segfault on segment load in the #1222 failure mode.
     _refresh_vector_disabled_flag()
+    # Retrieval depth. Fusion can only rank what was retrieved: a lexically
+    # perfect drawer absent from the vector pool arrives with distance=None and
+    # is capped below junk that IS in the pool. Industry norm for fusion depth is
+    # 50-200; this path used the caller's limit (5). Retrieve deep, return limit.
+    # Union + max_distance=0.0 only when the caller set no explicit bound --
+    # _merge_bm25_union_candidates returns early above 0.0, and an explicit bound
+    # is a real contract we must not silently drop. Measured: the 1.5 default
+    # filters nothing (whole observed distance range is 0.16-0.38).
+    _explicit_bound = min_similarity is not None or max_distance != 1.5
+    _strategy = "vector" if _explicit_bound else "union"
+    _dist = dist if _explicit_bound else 0.0
+    _depth = max(int(limit or 5), 50)
     result = search_memories(
         sanitized["clean_query"],
         palace_path=_config.palace_path,
         wing=wing,
         room=room,
         source_file=source_file,
-        n_results=limit,
-        max_distance=dist,
+        n_results=_depth,
+        max_distance=_dist,
         vector_disabled=_vector_disabled,
+        candidate_strategy=_strategy,
         collection_name=_config.collection_name,
     )
+    if isinstance(result, dict) and isinstance(result.get("results"), list):
+        result["results"] = result["results"][:limit]
     if _is_transient_index_error(result):
         # Post-bulk-write HNSW flush window (#1315): drop caches, give
         # the segment a moment to settle, retry once. Caller never sees
@@ -1721,17 +1736,32 @@ def tool_search(
         _force_chroma_cache_reset()
         time.sleep(2)
         _refresh_vector_disabled_flag()
+        # Retrieval depth. Fusion can only rank what was retrieved: a lexically
+        # perfect drawer absent from the vector pool arrives with distance=None and
+        # is capped below junk that IS in the pool. Industry norm for fusion depth is
+        # 50-200; this path used the caller's limit (5). Retrieve deep, return limit.
+        # Union + max_distance=0.0 only when the caller set no explicit bound --
+        # _merge_bm25_union_candidates returns early above 0.0, and an explicit bound
+        # is a real contract we must not silently drop. Measured: the 1.5 default
+        # filters nothing (whole observed distance range is 0.16-0.38).
+        _explicit_bound = min_similarity is not None or max_distance != 1.5
+        _strategy = "vector" if _explicit_bound else "union"
+        _dist = dist if _explicit_bound else 0.0
+        _depth = max(int(limit or 5), 50)
         result = search_memories(
             sanitized["clean_query"],
             palace_path=_config.palace_path,
             wing=wing,
             room=room,
             source_file=source_file,
-            n_results=limit,
-            max_distance=dist,
+            n_results=_depth,
+            max_distance=_dist,
             vector_disabled=_vector_disabled,
+            candidate_strategy=_strategy,
             collection_name=_config.collection_name,
         )
+        if isinstance(result, dict) and isinstance(result.get("results"), list):
+            result["results"] = result["results"][:limit]
         if not _is_transient_index_error(result):
             result["index_recovered"] = True
     if _vector_disabled:
@@ -2160,6 +2190,19 @@ def _build_chunk_rows(drawer_id: str, content: str, meta: dict, chunk_size: int)
             for start in range(0, len(content), chunk_size)
         ]
     )
+
+    # A fixed-width slice leaves a runt tail (1601 chars -> 800/800/1). Such a chunk
+    # carries no retrievable meaning and behaves as a hub vector: measured 2026-07-22,
+    # 34 sub-50-char chunks took 25% of vector top-5 slots on exact-term queries, and a
+    # bare newline outscored every correct hit. config declares min_chunk_size (default
+    # 50) for exactly this; this MCP path never applied it, while miner.py:582 does.
+    # Merge rather than drop -- for a diary drawer the tail is the provenance footer, so
+    # dropping would lose data. chunk_index is positional, so indices stay contiguous.
+    _min_chunk = max(0, int(getattr(_config, "min_chunk_size", 50) or 0))
+    if len(spans) > 1 and len(spans[-1][1]) < _min_chunk:
+        _, _tail = spans.pop()
+        _pstart, _pdoc = spans[-1]
+        spans[-1] = (_pstart, _pdoc + _tail)
 
     chunk_ids = []
     chunk_docs = []
