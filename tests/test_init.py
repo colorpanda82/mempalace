@@ -31,6 +31,13 @@ def test_init_filters_sys_path_from_leaked_pythonpath(pythonpath):
     their own subprocesses; the env strip lives in the CLI/MCP entry
     points (see test_cli.py / test_mcp_server.py).
 
+    The sys.path membership check resolves the empty-string CWD marker to
+    os.getcwd(): `python -c` represents the current directory as '' on
+    sys.path, so a package imported from CWD has an importable parent that a
+    literal string comparison cannot see. Filtering those entries out made
+    this test fail for the 'empty' and 'unset' cases too, where the leak
+    filter provably strips nothing (it early-returns on a falsy PYTHONPATH).
+
     Asserts on the sentinel substring directly so the test does not
     couple to the production normalization logic. The dot/empty/unset
     cases additionally exercise the early-return / collision paths
@@ -47,8 +54,8 @@ def test_init_filters_sys_path_from_leaked_pythonpath(pythonpath):
         "print('ENV:', repr(os.environ.get('PYTHONPATH'))); "
         "print('SENTINEL_IN_PATH:', any(prefix in (p or '') for p in sys.path)); "
         "print('MEMPALACE_PARENT_PRESENT:', any("
-        "os.path.normcase(os.path.normpath(p)) == os.path.normcase(os.path.normpath(mempalace_parent)) "
-        "for p in sys.path if p))"
+        "os.path.normcase(os.path.normpath(p or os.getcwd())) == os.path.normcase(os.path.normpath(mempalace_parent)) "
+        "for p in sys.path))"
     )
     result = subprocess.run(
         [sys.executable, "-c", code],

@@ -372,3 +372,35 @@ def seeded_kg(kg):
     kg.add_triple("Alice", "works_at", "NewCo", valid_from="2025-01-01")
 
     return kg
+
+
+# --- test-suite file-descriptor headroom -------------------------------------
+# This suite opens far more descriptors than the macOS default soft limit of 256
+# allows: measured 2026-07-22, at 256 the run dies before emitting a summary, at
+# 1024 it reports 88 failures and 67 errors with 24 "OSError: [Errno 24] Too many
+# open files" during tmpdir cleanup, and at 8192 it settles at 17 failures with
+# zero fd errors. Those low-limit failures are artefacts of descriptor starvation,
+# not defects -- which made the suite look broken when it was merely unrunnable.
+#
+# The hard limit is typically unlimited, so the suite raises its own soft limit at
+# collection time. pytest config cannot express an rlimit, so this has to be code,
+# and conftest runs before any test is collected.
+def _mempalace_raise_fd_limit(target: int = 8192) -> None:
+    try:
+        import resource  # POSIX only; absent on Windows
+    except ImportError:
+        return
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    except (ValueError, OSError):
+        return
+    want = target if hard == resource.RLIM_INFINITY else min(target, hard)
+    if soft < want:
+        try:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+        except (ValueError, OSError):
+            # Not fatal: the suite still runs, it just may hit Errno 24 again.
+            pass
+
+
+_mempalace_raise_fd_limit()
