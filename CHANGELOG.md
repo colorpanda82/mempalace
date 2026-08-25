@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Bug Fixes
+
+- **`sync --apply` no longer deletes drawers whose source file it could not reach.** `_classify_drawer` separated keep from remove with one `Path.exists()`, and `missing` feeds `removable_ids`, so every state that answered no became a deletion. Of twelve source-file states driven through `sync_palace`, eight were deleted and four of those had really gone: two were a file on a volume that is not mounted, at an empty mount point or at one holding a committed `.gitkeep`, and two were a path that could not be walked at all. Three further states ended the whole run instead, dry run included, and two of those moved with the interpreter as `pathlib` stopped raising. End to end, a project mined from a mounted volume lost every drawer to one `sync --apply` while the volume was away, and the search came back empty once it returned. Removal now asks for corroboration rather than a probe: a file not at its path is removable only while the palace still sees a source of its own, a regular file, in that same directory. A deletion leaves the file's neighbours where they were; an unmounted volume takes all of them at once, and no errno separates the two. Both halves of the verdict are read again at the moment it is formed, because a volume can leave inside one pass and come back inside one. Everything uncorroborated lands in a new bucket, `unresolved`, never added to `removable_ids` and reported the way removals are: counted beside the other buckets, and its source files named in `unresolved_by_source` and printed, with the remainder stated when that list is cut at five. The price: a directory with no surviving known source corroborates nothing, so a file deleted alone from a one-file directory, or a directory's files deleted together, is kept and reported rather than pruned. (#2320)
+
 ---
 
 ## [3.4.1] — 2026-06-14
