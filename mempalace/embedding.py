@@ -441,7 +441,11 @@ class EmbeddinggemmaONNX:
                         "~/.mempalace/config.json to skip this check.",
                         self._providers[0],
                     )
-                    session = ort.InferenceSession(model_path, providers=["CPUExecutionProvider"])
+                    session = ort.InferenceSession(
+                        model_path,
+                        sess_options=_intra_op_session_options(self._intra_op_num_threads),
+                        providers=["CPUExecutionProvider"],
+                    )
                     if not _embeddinggemma_session_is_healthy(session, tokenizer, output_idx, np):
                         # No provider left to fall back to. Raising loses this
                         # process's embeddings; continuing would write vectors

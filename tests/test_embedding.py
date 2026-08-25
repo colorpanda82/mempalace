@@ -170,7 +170,7 @@ def test_get_embedding_function_threads_cap_passed_to_minilm_ef(monkeypatch):
 
     monkeypatch.setattr(embedding, "_build_ef_class", lambda: DummyEF)
     monkeypatch.setattr(
-        embedding, "_resolve_providers", lambda device: (["CPUExecutionProvider"], "cpu")
+        embedding, "_resolve_providers", lambda device, model=None: (["CPUExecutionProvider"], "cpu")
     )
     monkeypatch.setattr(embedding, "_resolve_intra_op_threads", lambda: 2)
 
@@ -188,7 +188,7 @@ def test_get_embedding_function_threads_cap_passed_to_embeddinggemma(monkeypatch
 
     monkeypatch.setattr(embedding, "EmbeddinggemmaONNX", DummyGemma)
     monkeypatch.setattr(
-        embedding, "_resolve_providers", lambda device: (["CPUExecutionProvider"], "cpu")
+        embedding, "_resolve_providers", lambda device, model=None: (["CPUExecutionProvider"], "cpu")
     )
     monkeypatch.setattr(embedding, "_resolve_intra_op_threads", lambda: 4)
 
