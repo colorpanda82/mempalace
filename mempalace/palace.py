@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import threading
+import time
 from typing import Optional
 
 from .backends import (
@@ -725,6 +726,7 @@ def mine_lock(source_file: str):
     Prevents multiple agents from mining the same file simultaneously,
     which causes duplicate drawers when the delete+insert cycle interleaves.
     """
+    _maybe_reap_stale_mine_locks()
     lock_path = _mine_lock_path(source_file)
     lf = _acquire_mine_lock_file(lock_path)
     try:
@@ -902,6 +904,92 @@ def _cleanup_mine_lock_file(lock_path: str) -> None:
                 except Exception:
                     logger.debug("Mine-lock cleanup release failed", exc_info=True)
             lf.close()
+
+
+def reap_stale_mine_locks(*, min_age_seconds: int = 3600) -> tuple[int, int]:
+    """Best-effort garbage collection for orphaned per-source-file mine locks.
+
+    ``_cleanup_mine_lock_file`` reclaims a lock file correctly on the happy
+    path (see its docstring) — but only for the *specific* lock a
+    :func:`mine_lock` context manager just released. A process that dies
+    before reaching its own ``finally`` block (killed, crashed, force-quit,
+    host reboot) never runs that cleanup, and nothing else in this codebase
+    later revisits that lock file. Locks in ``~/.mempalace/locks/`` can
+    accumulate unboundedly over time as a result — one long-lived
+    installation was found with 5,636 stale entries, the oldest several
+    months old, none held by any live process (confirmed via ``lsof``).
+
+    This reuses :func:`_cleanup_mine_lock_file` itself for the actual
+    removal — same nonblocking-flock-reacquire safety mechanism, same
+    Windows/POSIX handling, no duplicated locking logic. A lock is only
+    ever removed after *this* process re-acquires it, so anything
+    genuinely held by a live process is left untouched regardless of
+    ``min_age_seconds``. ``min_age_seconds`` is a courtesy throttle only —
+    it avoids racing a lock that was *just* released and may still be
+    mid-rendezvous with a waiter on the same pathname; it is not a
+    substitute for the flock check, which is what actually makes removal
+    safe.
+
+    Skips ``mine_palace_*.lock`` files — those belong to the newer
+    palace-level :func:`mine_palace_lock` and have their own
+    lifecycle/holder tracking; this targets only the per-source-file locks
+    :func:`mine_lock` creates via :func:`_mine_lock_path`.
+
+    Returns ``(reaped, skipped)`` counts, for logging/testing — callers
+    don't need to act on them.
+    """
+    lock_dir = os.path.join(os.path.expanduser("~"), ".mempalace", "locks")
+    try:
+        entries = os.listdir(lock_dir)
+    except OSError:
+        return 0, 0
+
+    now = time.time()
+    reaped = 0
+    skipped = 0
+    for name in entries:
+        if not name.endswith(".lock") or name.startswith("mine_palace_"):
+            continue
+        lock_path = os.path.join(lock_dir, name)
+        try:
+            if now - os.path.getmtime(lock_path) < min_age_seconds:
+                continue
+        except OSError:
+            continue
+        _cleanup_mine_lock_file(lock_path)
+        if os.path.exists(lock_path):
+            skipped += 1
+        else:
+            reaped += 1
+    return reaped, skipped
+
+
+_LOCK_REAP_INTERVAL_SECONDS = 900  # 15 minutes between opportunistic sweeps
+
+
+def _maybe_reap_stale_mine_locks() -> None:
+    """Throttled, opportunistic call site for :func:`reap_stale_mine_locks`.
+
+    Runs at most once per ``_LOCK_REAP_INTERVAL_SECONDS``, piggybacking on
+    the natural cadence of mine operations rather than requiring a
+    background thread, a scheduled task, or any new CLI surface. Failures
+    are swallowed — lock maintenance must never be allowed to break an
+    actual mine.
+    """
+    lock_dir = os.path.join(os.path.expanduser("~"), ".mempalace", "locks")
+    marker = os.path.join(lock_dir, ".last_reap")
+    try:
+        if (
+            os.path.exists(marker)
+            and time.time() - os.path.getmtime(marker) < _LOCK_REAP_INTERVAL_SECONDS
+        ):
+            return
+        os.makedirs(lock_dir, exist_ok=True)
+        open(marker, "a").close()
+        os.utime(marker, None)
+        reap_stale_mine_locks()
+    except Exception:
+        logger.debug("Opportunistic mine-lock reap failed", exc_info=True)
 
 
 class MineAlreadyRunning(RuntimeError):
@@ -1129,8 +1217,11 @@ def mine_palace_lock(palace_path: str):
                 ) from exc
         # Record our own identity for any later contender's diagnostic message.
         _write_lock_holder(lf)
-        _mark_held(palace_key)
+        # _mark_held inside the try: an async interrupt between hold and try
+        # would otherwise strand the key in the holder set after the flock is
+        # freed, letting a later re-entrant acquire write without the lock.
         try:
+            _mark_held(palace_key)
             yield
         finally:
             _mark_released(palace_key)
