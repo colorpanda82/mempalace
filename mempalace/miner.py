@@ -7,6 +7,7 @@ Routes each file to the right room based on content.
 Stores verbatim chunks as drawers. No summaries. Ever.
 """
 
+import errno
 import os
 import re
 import stat
@@ -65,10 +66,25 @@ def _read_text_no_follow(filepath: Path, root: Path) -> Optional[tuple[str, floa
     be silently and permanently skipped)."""
     if not _path_within_root(filepath, root):
         return None
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    # O_NONBLOCK makes the S_ISREG check below reachable: opening a FIFO
+    # for reading parks in the kernel until a writer appears, so without it
+    # a named pipe with a readable suffix wedges the mine forever (3.7.1's
+    # #2221). Harmless for regular files; see the EAGAIN branch below.
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
     fd = -1
     try:
-        fd = os.open(filepath, flags)
+        try:
+            fd = os.open(filepath, flags)
+        except OSError as exc:
+            # A reader that breaks a write lease gets EAGAIN when it passes
+            # O_NONBLOCK, where a blocking open waits out lease-break-time
+            # and succeeds. The kernel grants leases on regular files only
+            # (F_SETLEASE on a pipe fails EINVAL), so re-check the type and
+            # then read it the way this code did before the flag existed;
+            # dropping it would silently lose a file that used to be mined.
+            if exc.errno != errno.EAGAIN or not stat.S_ISREG(os.lstat(filepath).st_mode):
+                raise
+            fd = os.open(filepath, flags & ~getattr(os, "O_NONBLOCK", 0))
         st = os.fstat(fd)
         if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_FILE_SIZE:
             return None

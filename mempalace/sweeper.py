@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import json
 import logging
+import stat
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -317,6 +318,27 @@ def sweep_directory(dir_path: str, palace_path: str) -> dict:
 
     failures: list[dict] = []
     for f in files:
+        # A non-regular match is not a sweep failure, it is nothing to sweep.
+        # ``rglob`` lists a FIFO or a symlink to /dev/null like any other
+        # ``*.jsonl``; report it the way ``miner.scan_project`` reports one
+        # and leave ``failures`` (and the exit status) for real errors.
+        # ``parse_claude_jsonl`` still refuses one, for callers arriving by
+        # another route.
+        try:
+            regular = stat.S_ISREG(f.stat().st_mode)
+        except OSError as exc:
+            # A stat that FAILS is a real error, not a benign type. A dangling
+            # symlink, a symlink loop and a file unlinked between rglob and
+            # here all land here, and every one of them used to reach ``open``
+            # and be booked below. Keep booking them, or ``sweep`` reports
+            # success on a transcript it could not read.
+            logger.error("sweeper: stat failed on %s: %s", f, exc)
+            print(f"  WARNING: stat failed on {f}: {exc}", file=sys.stderr)
+            failures.append({"file": str(f), "error": str(exc)})
+            continue
+        if not regular:
+            print(f"  SKIP: {f.name} (not a regular file)", file=sys.stderr)
+            continue
         try:
             result = sweep(str(f), palace_path, source_label=str(f))
         except Exception as exc:
