@@ -11,7 +11,12 @@ from mempalace.convo_miner import (
     _resolve_wing,
     mine_convos,
 )
-from mempalace.palace import MineAlreadyRunning, file_already_mined
+from mempalace.palace import (
+    NORMALIZE_VERSION,
+    MineAlreadyRunning,
+    file_already_mined,
+    prefetch_mined_set,
+)
 
 
 def test_convo_mining():
@@ -454,3 +459,253 @@ def test_mine_convos_limit_skips_already_mined(capsys):
                 break
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+# ── mtime-aware re-mining ────────────────────────────────────────────
+#
+# Conversation transcripts are NOT immutable: a Claude Code session keeps
+# appending to its own file while active, and /compact or /clear can
+# rewrite one in place. These tests cover the fix -- convo mining used to
+# treat "we've seen this source_file before" as sufficient to skip it
+# forever (transcripts were assumed immutable), silently missing content
+# appended after the first mine.
+
+
+def _privacy_export_bundle(conversations):
+    """Build a Claude.ai privacy-export-shaped JSON payload: an array of
+    conversation objects, each with its own chat_messages list."""
+    return [
+        {
+            "chat_messages": [
+                {"sender": "human", "text": turn}
+                if i % 2 == 0
+                else {"sender": "assistant", "text": turn}
+                for i, turn in enumerate(turns)
+            ]
+        }
+        for turns in conversations
+    ]
+
+
+def test_content_dedup_is_scoped_per_wing():
+    """Mining the same transcript content into a second wing must file real
+    drawers there, not just the registry sentinel -- the content-hash map
+    is a dedup signal within a wing, not a cross-wing "already have this
+    content anywhere" gate.
+    """
+    tmpdir = tempfile.mkdtemp()
+    try:
+        transcript = (
+            "> What is the plan?\nStart with the schema, then the API.\n\n"
+            "> Any risks?\nMigration ordering is the main one.\n"
+        )
+        dir_a = Path(tmpdir) / "wing_a_src"
+        dir_b = Path(tmpdir) / "wing_b_src"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        (dir_a / "session.txt").write_text(transcript)
+        (dir_b / "session.txt").write_text(transcript)
+
+        palace_path = os.path.join(tmpdir, "palace")
+        mine_convos(str(dir_a), palace_path, wing="wing_a")
+        mine_convos(str(dir_b), palace_path, wing="wing_b")
+
+        client = chromadb.PersistentClient(path=palace_path)
+        col = client.get_collection("mempalace_drawers")
+        wing_b_docs = col.get(where={"wing": "wing_b"}, include=["documents", "metadatas"])
+        real_drawers = [
+            d
+            for d, m in zip(wing_b_docs["documents"], wing_b_docs["metadatas"])
+            if m.get("room") != "_registry"
+        ]
+        assert real_drawers, (
+            "wing_b holds only the registry sentinel -- content dedup leaked across wings"
+        )
+        assert any("Migration ordering is the main one" in d for d in real_drawers)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_prefetch_mined_set_returns_stored_mtime():
+    """prefetch_mined_set's dict carries each source_file's stored mtime,
+    not just membership."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        convo_path = Path(tmpdir) / "session.txt"
+        convo_path.write_text(
+            "> What is the plan?\nStart with the schema, then the API.\n\n"
+            "> Any risks?\nMigration ordering is the main one.\n"
+        )
+        palace_path = os.path.join(tmpdir, "palace")
+        mine_convos(tmpdir, palace_path, wing="test")
+
+        resolved_file = str(convo_path.resolve())
+        actual_mtime = os.path.getmtime(resolved_file)
+
+        client = chromadb.PersistentClient(path=palace_path)
+        col = client.get_collection("mempalace_drawers")
+        mined = prefetch_mined_set(col, extract_mode="exchange")
+
+        assert resolved_file in mined
+        assert mined[resolved_file] is not None
+        assert abs(mined[resolved_file] - actual_mtime) < 0.001
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_prefetch_mined_set_none_for_drawer_without_stored_mtime():
+    """A drawer written before source_mtime existed (or with getmtime
+    failure at write time) must surface as None, not be silently absent --
+    None must be treated as stale by callers, not as 'unknown, assume ok'."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        palace_path = os.path.join(tmpdir, "palace")
+        client = chromadb.PersistentClient(path=palace_path)
+        col = client.get_or_create_collection("mempalace_drawers")
+        col.upsert(
+            ids=["drawer_legacy_1"],
+            documents=["legacy content with no source_mtime field"],
+            metadatas=[
+                {
+                    "wing": "test",
+                    "room": "general",
+                    "source_file": "/fake/legacy/file.txt",
+                    "chunk_index": 0,
+                    "extract_mode": "exchange",
+                    "normalize_version": 999,  # force >= current version
+                }
+            ],
+        )
+        mined = prefetch_mined_set(col, extract_mode="exchange")
+        assert "/fake/legacy/file.txt" in mined
+        assert mined["/fake/legacy/file.txt"] is None
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+def test_prefetch_mined_set_omits_incomplete_chunk_total_group():
+    """Mid-file partials with chunk_total must not bulk-skip the source (#2183)."""
+    tmpdir = tempfile.mkdtemp()
+    try:
+        palace_path = os.path.join(tmpdir, "palace")
+        client = chromadb.PersistentClient(path=palace_path)
+        col = client.get_or_create_collection("mempalace_drawers")
+        mtime = 1_700_000_000.0
+        source = "/fake/session.jsonl"
+        # Only 2 of 3 expected chunks landed before a crash.
+        col.upsert(
+            ids=["d0", "d1"],
+            documents=["chunk 0", "chunk 1"],
+            metadatas=[
+                {
+                    "wing": "test",
+                    "room": "general",
+                    "source_file": source,
+                    "chunk_index": 0,
+                    "extract_mode": "exchange",
+                    "normalize_version": NORMALIZE_VERSION,
+                    "source_mtime": mtime,
+                    "chunk_total": 3,
+                },
+                {
+                    "wing": "test",
+                    "room": "general",
+                    "source_file": source,
+                    "chunk_index": 1,
+                    "extract_mode": "exchange",
+                    "normalize_version": NORMALIZE_VERSION,
+                    "source_mtime": mtime,
+                    "chunk_total": 3,
+                },
+            ],
+        )
+        mined = prefetch_mined_set(col, extract_mode="exchange")
+        assert source not in mined, (
+            "prefetch_mined_set treated 2/3 chunks as fully filed — the bulk "
+            "skip path would permanently strand the missing exchange (#2183)"
+        )
+
+        col.upsert(
+            ids=["d2"],
+            documents=["chunk 2"],
+            metadatas=[
+                {
+                    "wing": "test",
+                    "room": "general",
+                    "source_file": source,
+                    "chunk_index": 2,
+                    "extract_mode": "exchange",
+                    "normalize_version": NORMALIZE_VERSION,
+                    "source_mtime": mtime,
+                    "chunk_total": 3,
+                }
+            ],
+        )
+        mined = prefetch_mined_set(col, extract_mode="exchange")
+        assert source in mined
+        assert abs(mined[source] - mtime) < 0.001
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+
+class _RecordingCollection:
+    """Captures upsert kwargs without a real ChromaDB behind it."""
+
+    def __init__(self):
+        self.upserts = []
+
+    def upsert(self, *, ids, documents, metadatas):
+        self.upserts.append({"ids": ids, "documents": documents, "metadatas": metadatas})
+
+
+def _exchange_kwargs(**overrides):
+    kwargs = {
+        "wing": "wing_dev",
+        "room": "conversations",
+        "text": "User: hi\n\nAssistant: hello",
+        "source_file": "hermes-session:s1",
+        "agent": "hermes",
+    }
+    kwargs.update(overrides)
+    return kwargs
+
+
+def _write_dry_run_transcript(path: Path) -> None:
+    path.write_text(
+        "> What is the plan?\n"
+        "Start with the schema, then the API.\n\n"
+        "> Are there any risks?\n"
+        "Migration ordering is the main one.\n\n"
+        "> What comes next?\n"
+        "Run focused tests before the full suite.\n",
+        encoding="utf-8",
+    )
+
+
+def test_mine_convos_dry_run_missing_palace_does_not_create_it(
+    tmp_path,
+    capsys,
+    monkeypatch,
+):
+    monkeypatch.setenv("HOME", str(tmp_path))
+
+    convo_dir = tmp_path / "convos"
+    convo_dir.mkdir()
+    transcript = convo_dir / "session.txt"
+    _write_dry_run_transcript(transcript)
+    palace_path = tmp_path / "palace"
+
+    mine_convos(
+        str(convo_dir),
+        str(palace_path),
+        wing="target",
+        dry_run=True,
+    )
+    output = capsys.readouterr().out
+
+    assert "[DRY RUN] session.txt" in output
+    assert "Files processed: 1" in output
+    assert "Files skipped (already filed): 0" in output
+    assert not palace_path.exists()
+
+

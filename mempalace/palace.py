@@ -1390,12 +1390,21 @@ def prefetch_mined_set(collection, extract_mode: Optional[str] = None) -> set[st
     When extract_mode is set, mirrors file_already_mined(..., extract_mode=...)
     so conversation mines skip per extraction mode rather than per source file.
 
+    Completeness mirrors :func:`file_already_mined`'s ``chunk_total`` rule
+    (#2183): a source that only has a mid-file partial (surviving drawers
+    share the current mtime but are short of ``chunk_total``) is **omitted**
+    from the result so the bulk skip path re-mines instead of permanently
+    stranding the missing exchanges. Drawers with no ``chunk_total``
+    (legacy rows, registry sentinels) are trusted on their own, as before.
+
     The convo miner walks thousands of transcript files; per-file
     `collection.get(where={"source_file": X})` costs ~2s on a 150k-drawer
     palace, making a 2000-file sweep take >1h of pure skip-checking. This
     helper drops that to a single paginated scan plus O(1) lookups.
     """
-    mined: set[str] = set()
+    # Per source_file: per stored_mtime group → count + optional chunk_total.
+    # A source is only "mined" once some group is complete.
+    groups: dict[str, dict] = {}
     try:
         total = collection.count()
         offset = 0
@@ -1410,11 +1419,35 @@ def prefetch_mined_set(collection, extract_mode: Optional[str] = None) -> set[st
                     continue
                 # Same default as file_already_mined: missing version == 1
                 version = meta.get("normalize_version", 1)
-                if version >= NORMALIZE_VERSION:
-                    mined.add(src)
+                if version < NORMALIZE_VERSION:
+                    continue
+                stored_mtime = meta.get("source_mtime")
+                mtime_key = float(stored_mtime) if stored_mtime is not None else None
+                entry = groups.setdefault(src, {}).setdefault(
+                    mtime_key, {"count": 0, "chunk_total": None}
+                )
+                entry["count"] += 1
+                chunk_total = meta.get("chunk_total")
+                if chunk_total is not None:
+                    try:
+                        entry["chunk_total"] = int(chunk_total)
+                    except (TypeError, ValueError):
+                        pass
             if not batch["ids"]:
                 break
             offset += len(batch["ids"])
     except Exception:
-        logger.warning("prefetch_mined_set: partial fetch, %d files loaded", len(mined))
+        logger.warning("prefetch_mined_set: partial fetch, %d source groups loaded", len(groups))
+
+    mined: dict[str, Optional[float]] = {}
+    for src, by_mtime in groups.items():
+        for mtime_key, entry in by_mtime.items():
+            chunk_total = entry["chunk_total"]
+            if chunk_total is None:
+                # Legacy / registry: no completion marker — trust membership.
+                mined[src] = mtime_key
+                break
+            if entry["count"] >= chunk_total:
+                mined[src] = mtime_key
+                break
     return mined
