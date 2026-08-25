@@ -1278,6 +1278,15 @@ def file_already_mined(
     that extraction mode so exchange-mode and general-mode drawers can coexist
     for the same source transcript. Legacy drawers without extract_mode are
     treated as exchange-mode drawers.
+
+    A drawer whose metadata carries ``chunk_total`` (see #21) is only
+    counted toward a match once its stored_mtime group has accumulated at
+    least that many drawers -- guarding against a mid-file crash between
+    upsert batches, where the surviving drawers share the current mtime
+    (the file itself was never touched) but are short of the full set. A
+    drawer with no ``chunk_total`` (legacy rows, or a single-shot
+    ``add_drawer()`` call with no partial-batch risk) is trusted on its own,
+    exactly as before.
     """
     try:
         # Under the additive-mining model, a single ``source_file`` can have
@@ -1294,6 +1303,9 @@ def file_already_mined(
         # first matching group regardless of ordering.
         current_mtime = os.path.getmtime(source_file) if check_mtime else None
         offset = 0
+        # Tracks, per matching stored_mtime group, how many drawers have
+        # been seen so far toward that group's own chunk_total (#21).
+        group_counts: dict = {}
         while True:
             results = collection.get(
                 where={"source_file": source_file},
@@ -1319,7 +1331,16 @@ def file_already_mined(
                 stored_mtime = meta.get("source_mtime")
                 if stored_mtime is None:
                     continue
-                if abs(float(stored_mtime) - current_mtime) < 0.001:
+                if abs(float(stored_mtime) - current_mtime) >= 0.001:
+                    continue
+                chunk_total = meta.get("chunk_total")
+                if chunk_total is None:
+                    # No completion marker on this drawer — can't verify
+                    # completeness for its group, trust the match as before.
+                    return True
+                seen = group_counts.get(stored_mtime, 0) + 1
+                group_counts[stored_mtime] = seen
+                if seen >= chunk_total:
                     return True
             if not ids:
                 break
