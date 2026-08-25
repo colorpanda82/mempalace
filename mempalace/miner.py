@@ -9,6 +9,7 @@ Stores verbatim chunks as drawers. No summaries. Ever.
 
 import os
 import re
+import stat
 import sys
 import shlex
 import hashlib
@@ -46,6 +47,44 @@ from .hallways import compute_hallways_for_wing
 from .ids import ID_RECIPE, make_drawer_id_from_chunk
 
 logger = logging.getLogger("mempalace_mcp")
+
+
+def _path_within_root(path: Path, root: Path) -> bool:
+    try:
+        path.expanduser().resolve().relative_to(root.expanduser().resolve())
+        return True
+    except (OSError, ValueError):
+        return False
+
+
+def _read_text_no_follow(filepath: Path, root: Path) -> Optional[tuple[str, float]]:
+    """Read ``filepath`` and return ``(content, mtime)`` from the SAME
+    ``fstat()`` call that validated the file, so callers never need a
+    separate, later ``os.path.getmtime()`` that could observe a file
+    modified in between (see #22: a stale re-stat lets appended content
+    be silently and permanently skipped)."""
+    if not _path_within_root(filepath, root):
+        return None
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    try:
+        fd = os.open(filepath, flags)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX_FILE_SIZE:
+            return None
+        mtime = st.st_mtime
+        with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as f:
+            fd = -1
+            return f.read(), mtime
+    except OSError:
+        return None
+    finally:
+        if fd != -1:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
 
 READABLE_EXTENSIONS = {
     ".txt",
@@ -1203,6 +1242,7 @@ def _build_drawer_metadata(
     line_start: Optional[int] = None,
     line_end: Optional[int] = None,
     content_date: Optional[str] = None,
+    chunk_total: Optional[int] = None,
 ) -> dict:
     """Build the metadata dict for one drawer without upserting.
 
@@ -1218,6 +1258,14 @@ def _build_drawer_metadata(
     (legacy callers, pre-Tier-6a drawers), the keys are absent from the
     returned dict and downstream code falls back to ``filed_at`` for the
     date and the 3-segment closet pointer format.
+
+    ``chunk_total`` — the total number of chunks this mining pass expects
+    to write for ``source_file`` (see #21). Every chunk of the same pass
+    carries the same value so ``file_already_mined`` can tell "N of N
+    batches committed" from "crashed after batch 1 of N", instead of
+    treating any surviving drawer with a matching mtime as proof the file
+    is fully mined. ``None`` for legacy callers (e.g. ``add_drawer``,
+    which is inherently a single atomic write with no partial-batch risk).
     """
     metadata = {
         "wing": wing,
@@ -1237,6 +1285,8 @@ def _build_drawer_metadata(
         metadata["line_end"] = line_end
     if content_date:
         metadata["content_date"] = content_date
+    if chunk_total is not None:
+        metadata["chunk_total"] = chunk_total
     metadata["hall"] = detect_hall(content)
     entities = _extract_entities_for_metadata(content)
     if entities:
@@ -1304,10 +1354,10 @@ def process_file(
     if not dry_run and file_already_mined(collection, source_file, check_mtime=True):
         return 0, "general", None
 
-    try:
-        content = filepath.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    read_result = _read_text_no_follow(filepath, project_path)
+    if read_result is None:
         return 0, "general", None
+    content, read_mtime = read_result
 
     content = content.strip()
     if len(content) < effective_min:
@@ -1354,19 +1404,34 @@ def process_file(
         # hnswlib's thread-unsafe updatePoint path and can segfault on macOS ARM
         # with chromadb 0.6.3) into a clean delete+insert, bypassing the update
         # path entirely.
+        #
+        # A failed purge must abort this file's mine attempt rather than fall
+        # through to upsert: proceeding would either leave stale tail entries
+        # as permanent orphans (old chunk count > new) or silently overwrite
+        # only the overlapping chunk_index positions (not a real re-mine) --
+        # see #23. Returning here (without touching source_mtime/chunk_total)
+        # leaves the old drawers' stored mtime untouched, so the next mine
+        # still sees a mismatch against the current on-disk mtime and retries.
         try:
             collection.delete(where={"source_file": source_file})
-        except Exception:
+        except Exception as exc:
+            print(
+                f"  ! [skip] {filepath.name[:50]:50} stale-drawer purge failed "
+                f"({exc!r}); leaving existing drawers untouched, will retry "
+                f"on the next mine",
+                file=sys.stderr,
+            )
             logger.debug("Stale-drawer purge failed for %s", source_file, exc_info=True)
+            return 0, room, None
 
-        # Batch chunks into bounded upserts so the embedding model sees many
-        # chunks per forward pass without building one huge Chroma/SQLite
-        # request for pathological files. A bad chunk can fail its sub-batch;
-        # that is the deliberate trade-off for amortizing embedding overhead.
-        try:
-            source_mtime = os.path.getmtime(source_file)
-        except OSError:
-            source_mtime = None
+        # source_mtime is the mtime paired with the content actually read
+        # above (from _read_text_no_follow's own fstat), not a fresh re-stat
+        # here -- see #22. Re-statting separately can observe a file that was
+        # appended to between the read and this point, stamping drawers with
+        # an mtime that doesn't match what was actually chunked; the next
+        # mine's freshness check then sees stored-mtime == current-disk-mtime
+        # and silently, permanently skips the appended tail.
+        source_mtime = read_mtime
 
         # Tier 6a content-date: extract once per file (not per chunk) and
         # share across all chunks. Reads filename / frontmatter / content /
@@ -1401,6 +1466,7 @@ def process_file(
                         line_start=chunk.get("line_start"),
                         line_end=chunk.get("line_end"),
                         content_date=file_content_date,
+                        chunk_total=len(chunks),
                     )
                 )
             assert_no_collisions(list(zip(batch_ids, batch_metas)), collection)
@@ -1413,8 +1479,14 @@ def process_file(
             all_metas.extend(batch_metas)
 
         # Build closet — the searchable index pointing to these drawers.
-        # Purge first: a re-mine (mtime change or normalize_version bump) must
-        # fully replace the prior closets, not append to them.
+        # Purge unconditionally: the old drawers this closet pointed at were
+        # already deleted above regardless of how many chunks survived this
+        # pass's own length filter, so a re-mine that ends up with zero filed
+        # drawers must still end up with zero closets, not stale ones
+        # dangling on deleted drawer IDs (see #24). Only the closet
+        # rebuild itself is conditional on there being new drawers to point at.
+        if closets_col:
+            purge_file_closets(closets_col, source_file)
         if closets_col and drawers_added > 0:
             drawer_ids = [
                 make_drawer_id_from_chunk(wing, room, source_file, c["chunk_index"]) for c in chunks
@@ -1445,7 +1517,6 @@ def process_file(
             }
             if entities:
                 closet_meta["entities"] = entities
-            purge_file_closets(closets_col, source_file)
             upsert_closet_lines(closets_col, closet_id_base, closet_lines, closet_meta)
 
     return drawers_added, room, None
