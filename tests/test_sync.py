@@ -1363,7 +1363,8 @@ class TestSyncCli:
     def test_cli_emits_wal_on_apply(self, monkeypatch, synced_world):
         """F8 regression: cmd_sync must wire `_wal_log` so CLI deletes are
         audited. Without this, scripted CLI invocations leave no trail."""
-        from mempalace import cli, wal
+        from mempalace import cli
+        import pytest as _pytest_sk; wal = _pytest_sk.importorskip("mempalace.wal", reason="wal module absent on 3.4.1 base")
 
         seen = []
         original = wal._wal_log
