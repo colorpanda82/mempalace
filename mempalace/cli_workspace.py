@@ -189,11 +189,17 @@ def call_tool(name, args=None, *, palace_path=None):
     if hub is not None:
         from mempalace import hub_client
         base_url, headers = hub
+        # The hub validates argument TYPES, so a None that merely means "not
+        # given" (every tool_* kwarg defaults to None) is rejected as
+        # "Invalid value for parameter" — measured 2026-09-02 on max_distance,
+        # which broke every search-json call in the golden recall run. Omit
+        # such keys; in-process the default fills them identically.
+        hub_args = {k: v for k, v in args.items() if v is not None}
         request = {
             "jsonrpc": "2.0",
             "id": 1,
             "method": "tools/call",
-            "params": {"name": f"mempalace_{name}", "arguments": args},
+            "params": {"name": f"mempalace_{name}", "arguments": hub_args},
         }
         try:
             response = hub_client.forward_json_rpc(base_url, headers, request)

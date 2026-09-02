@@ -60,6 +60,18 @@ def test_forwards_to_hub_with_prefixed_name_and_unwraps_result(monkeypatch, tmp_
     assert request["params"]["arguments"] == {"wing": "w", "room": "r", "content": "c"}
 
 
+def test_none_arguments_are_omitted_on_the_hub_route(monkeypatch, tmp_path):
+    """The hub type-checks arguments; a None meaning 'not given' must not be sent
+    (2026-09-02: max_distance=None broke every search-json in golden recall)."""
+    fake = _FakeHubClient(_tool_response({"results": []}))
+    palace = _wire(monkeypatch, fake, tmp_path)
+
+    cli_workspace.call_tool("search", {"query": "q", "limit": 5, "wing": None,
+                                       "room": None, "max_distance": None}, palace_path=palace)
+
+    assert fake.sent[0][2]["params"]["arguments"] == {"query": "q", "limit": 5}
+
+
 def test_hub_json_rpc_error_maps_to_tool_error_shape(monkeypatch, tmp_path):
     refusal = {"jsonrpc": "2.0", "id": 1, "error": {
         "code": -32001, "message": "Peer MCP writer active",
