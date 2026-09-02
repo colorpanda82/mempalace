@@ -73,12 +73,28 @@ def _out(text):
 # Palace resolution + server binding
 # --------------------------------------------------------------------------
 
+def _default_palace():
+    """The palace this process is bound to, read the way mcp_server reads it.
+
+    ``MEMPALACE_PALACE_PATH`` wins over ``config.json``: cli.py sets that env
+    var from the global ``--palace`` flag AFTER ``mempalace.config`` was
+    imported, and ``MempalaceConfig()`` reports the import-time snapshot. Reading
+    the config first therefore resolved the wrong palace for hub discovery
+    (measured 2026-09-02: discovery on the config palace, write on the env
+    palace, refused by the lease).
+    """
+    env = os.environ.get("MEMPALACE_PALACE_PATH", "").strip()
+    if env:
+        return os.path.abspath(os.path.expanduser(env))
+    from mempalace.config import MempalaceConfig
+    return MempalaceConfig().palace_path
+
+
 def _resolve_palace(args):
     p = getattr(args, "palace", None)
     if p:
         return os.path.abspath(os.path.expanduser(p))
-    from mempalace.config import MempalaceConfig
-    return MempalaceConfig().palace_path
+    return _default_palace()
 
 
 def _server(args):
@@ -168,8 +184,7 @@ def call_tool(name, args=None, *, palace_path=None):
     if palace_path:
         palace_path = os.path.abspath(os.path.expanduser(palace_path))
     else:
-        from mempalace.config import MempalaceConfig
-        palace_path = MempalaceConfig().palace_path
+        palace_path = _default_palace()
     hub = _hub_for(palace_path)
     if hub is not None:
         from mempalace import hub_client
@@ -391,8 +406,17 @@ COMMANDS = {
 # --------------------------------------------------------------------------
 
 def _common(p):
-    """Every workspace subparser gets an optional --palace and --json flag."""
-    p.add_argument("--palace", help="Palace path (overrides config default)")
+    """Every workspace subparser gets an optional --palace and --json flag.
+
+    ``--palace`` uses ``SUPPRESS`` as its default: argparse applies a
+    subparser's defaults AFTER the parent parsed its flags, so a plain ``None``
+    default silently overwrote the global ``mempalace --palace X <verb>`` form
+    (measured 2026-09-02). With SUPPRESS the verb-level flag only sets
+    ``args.palace`` when actually given, and cli.py's global flag survives.
+    """
+    import argparse
+    p.add_argument("--palace", default=argparse.SUPPRESS,
+                   help="Palace path (overrides config default)")
     p.add_argument("--json", action="store_true", help="Emit raw JSON result")
     return p
 

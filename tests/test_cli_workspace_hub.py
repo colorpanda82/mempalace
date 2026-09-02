@@ -118,3 +118,27 @@ def test_search_json_default_max_distance_is_unbounded():
     cli_workspace.register(sub)
     ns = sub.choices["search-json"].parse_args(["q"])
     assert ns.max_distance is None
+
+
+def test_global_palace_flag_survives_verb_subparser():
+    """`mempalace --palace X add-drawer ...` must keep X: a subparser default of
+    None silently overwrote the parent's value (measured 2026-09-02), so hub
+    discovery ran against the config palace while the write hit the env one."""
+    import argparse
+    top = argparse.ArgumentParser()
+    top.add_argument("--palace")
+    sub = top.add_subparsers(dest="command")
+    cli_workspace.register(sub)
+    ns = top.parse_args(["--palace", "/p/global", "add-drawer", "--wing", "w", "--room", "r", "--content", "c"])
+    assert cli_workspace._resolve_palace(ns) == "/p/global"
+    ns = top.parse_args(["add-drawer", "--palace", "/p/verb", "--wing", "w", "--room", "r", "--content", "c"])
+    assert cli_workspace._resolve_palace(ns) == "/p/verb"
+
+
+def test_default_palace_prefers_env_over_config_snapshot(monkeypatch, tmp_path):
+    """cli.py exports MEMPALACE_PALACE_PATH after mempalace.config was imported,
+    so the env var, not the import-time config snapshot, is the truth."""
+    monkeypatch.setenv("MEMPALACE_PALACE_PATH", str(tmp_path / "envpalace"))
+    assert cli_workspace._default_palace() == str(tmp_path / "envpalace")
+    ns = type("NS", (), {})()  # no .palace attribute at all (SUPPRESS)
+    assert cli_workspace._resolve_palace(ns) == str(tmp_path / "envpalace")
