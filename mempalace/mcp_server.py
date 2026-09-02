@@ -2594,8 +2594,8 @@ def tool_search(
     # _merge_bm25_union_candidates returns early above 0.0, and an explicit bound
     # is a real contract we must not silently drop. Measured: the 1.5 default
     # filters nothing (whole observed distance range is 0.16-0.38).
-    _explicit_bound = min_similarity is not None or max_distance != 1.5
-    _strategy = "vector" if _explicit_bound else "union"
+    _explicit_bound = min_similarity is not None or max_distance is not None
+    _strategy = candidate_strategy if _explicit_bound else "union"
     _dist = dist if _explicit_bound else 0.0
     _depth = max(int(limit or 5), 100)
     result = search_memories(
@@ -2660,8 +2660,8 @@ def tool_search(
         # _merge_bm25_union_candidates returns early above 0.0, and an explicit bound
         # is a real contract we must not silently drop. Measured: the 1.5 default
         # filters nothing (whole observed distance range is 0.16-0.38).
-        _explicit_bound = min_similarity is not None or max_distance != 1.5
-        _strategy = "vector" if _explicit_bound else "union"
+        _explicit_bound = min_similarity is not None or max_distance is not None
+        _strategy = candidate_strategy if _explicit_bound else "union"
         _dist = dist if _explicit_bound else 0.0
         _depth = max(int(limit or 5), 100)
         result = search_memories(
