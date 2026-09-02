@@ -328,7 +328,20 @@ def prune_expired(palace_path=None, dry_run=True):
             action = "would-delete" if dry_run else "deleting"
             print(f"prune_expired: {action} [{wing}/{room}] {did[:48]}... (expired {exp_str})")
         if not dry_run:
-            col.delete(ids=[d[0] for d in to_delete])
+            # Hub-first (v3.9.0+): while a `mempalace serve` hub owns the palace a
+            # direct col.delete() is exactly the racing-writer path #2079 forbids.
+            # Route through the hub's delete tool when one is registered; the
+            # direct delete stays for palaces no hub serves.
+            from .cli_workspace import _hub_for, call_tool
+            from .config import MempalaceConfig
+            _palace = MempalaceConfig().palace_path
+            if _hub_for(_palace) is not None:
+                for did, wing, room, _exp in to_delete:
+                    r = call_tool("delete_drawer", {"drawer_id": did}, palace_path=_palace)
+                    if isinstance(r, dict) and (r.get("success") is False or "error" in r):
+                        print(f"prune_expired: hub refused delete of {did[:48]}: {r.get('error')}")
+            else:
+                col.delete(ids=[d[0] for d in to_delete])
 
     return scanned, len(to_delete)
 

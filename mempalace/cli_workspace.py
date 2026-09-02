@@ -16,10 +16,20 @@ Design contract:
   * Each CLI process is short-lived. Setting ``MEMPALACE_PALACE_PATH`` before
     the first import of ``mcp_server`` binds that module's global ``_config`` to
     the requested palace, matching how the MCP server resolves its palace.
+  * Hub first (v3.9.0+). Local file-backed palaces have ONE process-lifetime
+    writer (#2079); when a ``mempalace serve`` hub owns the palace, an in-process
+    ``tool_*`` write is refused with "palace is held by PID". ``call_tool`` is
+    the single seam every workspace writer goes through: it forwards to a live
+    hub as an MCP ``tools/call`` when one is registered for the palace, and
+    calls ``tool_*`` in-process otherwise. Reads take the same route so scripts
+    never hold a private HNSW copy next to the hub. ``MEMPALACE_HUB_FORWARD=0``
+    forces the direct path (upstream's own kill switch, shared).
 
-Public surface: ``register(sub)`` and ``maybe_dispatch(args)``.
+Public surface: ``register(sub)``, ``maybe_dispatch(args)`` and ``call_tool``.
 """
 
+import asyncio
+import inspect
 import json
 import os
 import sys
@@ -97,12 +107,102 @@ def _stdout_to_stderr():
         sys.stdout = old
 
 
+def _hub_for(palace_path):
+    """(base_url, headers) of a live hub serving ``palace_path``, else None."""
+    try:
+        from mempalace import hub_client
+        return hub_client.discover_hub(palace_path)
+    except Exception:  # noqa: BLE001 - discovery is best-effort; direct path remains
+        return None
+
+
+def _unwrap_tool_result(response):
+    """Turn a JSON-RPC ``tools/call`` response into the dict ``tool_*`` returns.
+
+    The MCP server serialises every tool result as ``json.dumps(result)`` inside
+    ``result.content[0].text``; a JSON-RPC ``error`` (peer-writer refusal, bad
+    params) is mapped onto the ``{"success": False, "error": ...}`` shape the
+    handlers already understand, so callers see one failure vocabulary.
+    """
+    if not isinstance(response, dict):
+        return {"success": False, "error": "hub returned no JSON-RPC response"}
+    if "error" in response:
+        err = response["error"] or {}
+        msg = err.get("message", "unknown hub error") if isinstance(err, dict) else str(err)
+        data = err.get("data") if isinstance(err, dict) else None
+        if isinstance(data, dict) and data.get("reason"):
+            msg = f"{msg}: {data['reason']}"
+        return {"success": False, "error": msg, "hub_error": err}
+    result = response.get("result") or {}
+    content = result.get("content") or []
+    text = ""
+    for part in content:
+        if isinstance(part, dict) and part.get("type") == "text":
+            text = part.get("text", "")
+            break
+    try:
+        parsed = json.loads(text) if text else {}
+    except (TypeError, ValueError):
+        parsed = {"text": text}
+    if result.get("isError") and isinstance(parsed, dict) and not _is_error(parsed):
+        parsed = {"success": False, "error": text or "tool reported isError"}
+    return parsed
+
+
+def _run_maybe_async(value):
+    if inspect.isawaitable(value):
+        return asyncio.run(value)
+    return value
+
+
+def call_tool(name, args=None, *, palace_path=None):
+    """Call one MemPalace tool by short name, via the hub if one owns the palace.
+
+    ``name`` is the tool without prefix (``"add_drawer"``); it becomes
+    ``mempalace_add_drawer`` on the hub and ``tool_add_drawer`` in-process.
+    ``args`` are the tool's keyword arguments (identical on both routes: the
+    hub dispatches ``tools/call`` arguments straight into the same function).
+    Returns the tool's result dict. Never raises for tool-level errors.
+    """
+    args = dict(args or {})
+    if palace_path:
+        palace_path = os.path.abspath(os.path.expanduser(palace_path))
+    else:
+        from mempalace.config import MempalaceConfig
+        palace_path = MempalaceConfig().palace_path
+    hub = _hub_for(palace_path)
+    if hub is not None:
+        from mempalace import hub_client
+        base_url, headers = hub
+        request = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": f"mempalace_{name}", "arguments": args},
+        }
+        try:
+            response = hub_client.forward_json_rpc(base_url, headers, request)
+        except Exception as e:  # noqa: BLE001 - a dead hub must not be silently retried locally
+            # A write that reached the hub may still be executing there; never
+            # replay it in-process (same rule as mcp_server._dispatch_stdio_request).
+            return {"success": False, "error": f"hub call failed: {e!r}", "hub": base_url}
+        out = _unwrap_tool_result(response)
+        if isinstance(out, dict):
+            out.setdefault("via", "hub")
+        return out
+    # In-process path only: mcp_server binds its module-global _config from
+    # MEMPALACE_PALACE_PATH at FIRST import, so the env must be set before it.
+    os.environ["MEMPALACE_PALACE_PATH"] = palace_path
+    from mempalace import mcp_server
+    fn = getattr(mcp_server, f"tool_{name}")
+    return _run_maybe_async(fn(**args))
+
+
 def _invoke(args, fn_name, **kwargs):
-    """Bind the palace, import mcp_server, and call one tool_* function with
-    stdout isolated to stderr so only our JSON reaches stdout."""
+    """Bind the palace and call one tool (hub-first) with stdout isolated to
+    stderr so only our JSON reaches stdout."""
     with _stdout_to_stderr():
-        m = _server(args)
-        return getattr(m, fn_name)(**kwargs)
+        return call_tool(fn_name[len("tool_"):], kwargs, palace_path=_resolve_palace(args))
 
 
 # --------------------------------------------------------------------------
@@ -263,8 +363,10 @@ def _h_ws_selftest(args):
     present, missing = [], []
     for name in WRAPPED_TOOLS:
         (present if hasattr(m, name) else missing).append(name)
+    hub = _hub_for(_resolve_palace(args))
     _out(json.dumps(
-        {"ok": not missing, "present": present, "missing": missing},
+        {"ok": not missing, "present": present, "missing": missing,
+         "hub": hub[0] if hub else None},
         ensure_ascii=False, indent=2,
     ))
     return 0 if not missing else 1
@@ -358,7 +460,9 @@ def register(sub):
     p.add_argument("--wing")
     p.add_argument("--room")
     p.add_argument("--source-file")
-    p.add_argument("--max-distance", type=float, default=1.5)
+    # None, not 1.5: since v3.9.0 tool_search treats ANY explicit max_distance as
+    # a caller-set bound, which switches off the union/fusion-depth override.
+    p.add_argument("--max-distance", type=float, default=None)
 
     # ws-selftest (no palace/tool call needed)
     _common(sub.add_parser(
