@@ -44,6 +44,7 @@ WRAPPED_TOOLS = [
     "tool_kg_add",
     "tool_kg_query",
     "tool_kg_invalidate",
+    "tool_kg_supersede",
     "tool_diary_write",
     "tool_diary_read",
 ]
@@ -251,7 +252,7 @@ def _summary(result):
         return f"ok: {len(result['entries'])} entry(ies)"
     bits = []
     for key in (
-        "triple_id", "fact", "drawer_id", "invalidated", "duplicate",
+        "triple_id", "fact", "superseded", "drawer_id", "invalidated", "duplicate",
         "count", "written", "topic", "message",
     ):
         if key in result:
@@ -309,6 +310,18 @@ def _h_kg_invalidate(args):
     return _emit(result, args)
 
 
+def _h_kg_supersede(args):
+    result = _invoke(
+        args, "tool_kg_supersede",
+        subject=args.subject,
+        predicate=args.predicate,
+        old_object=args.old_object,
+        new_object=args.new_object,
+        at=args.at,
+    )
+    return _emit(result, args)
+
+
 def _h_add_drawer(args):
     result = _invoke(
         args, "tool_add_drawer",
@@ -362,6 +375,8 @@ def _h_search_json(args):
         room=args.room,
         source_file=args.source_file,
         max_distance=args.max_distance,
+        since=args.since,
+        before=args.before,
     )
     _out(json.dumps(result, ensure_ascii=False, indent=2))
     return 1 if _is_error(result) else 0
@@ -398,6 +413,7 @@ COMMANDS = {
     "kg-add": _h_kg_add,
     "kg-query": _h_kg_query,
     "kg-invalidate": _h_kg_invalidate,
+    "kg-supersede": _h_kg_supersede,
     "add-drawer": _h_add_drawer,
     "check-duplicate": _h_check_duplicate,
     "diary-write": _h_diary_write,
@@ -455,6 +471,17 @@ def register(sub):
     p.add_argument("--object", required=True)
     p.add_argument("--ended")
 
+    # kg-supersede: close (S,P,old) and open (S,P,new) at one instant. The
+    # named path for single-valued predicates (version, deployed_on) since
+    # v3.9.0; replaces the kg-invalidate + kg-add pair.
+    p = _common(sub.add_parser("kg-supersede",
+                               help="Atomically replace a single-valued fact"))
+    p.add_argument("--subject", required=True)
+    p.add_argument("--predicate", required=True)
+    p.add_argument("--old-object", required=True)
+    p.add_argument("--new-object", required=True)
+    p.add_argument("--at", help="Boundary instant (YYYY-MM-DD or ...THH:MM:SSZ); default now")
+
     # add-drawer
     p = _common(sub.add_parser("add-drawer", help="Add a drawer to the palace"))
     p.add_argument("--wing", required=True)
@@ -493,6 +520,10 @@ def register(sub):
     # None, not 1.5: since v3.9.0 tool_search treats ANY explicit max_distance as
     # a caller-set bound, which switches off the union/fusion-depth override.
     p.add_argument("--max-distance", type=float, default=None)
+    # Date window on filed_at, [since, before). Drawers without filed_at are
+    # excluded while a bound is set (v3.7.0 #2000).
+    p.add_argument("--since", help="ISO date/datetime, inclusive")
+    p.add_argument("--before", help="ISO date/datetime, exclusive")
 
     # ws-selftest (no palace/tool call needed)
     _common(sub.add_parser(
