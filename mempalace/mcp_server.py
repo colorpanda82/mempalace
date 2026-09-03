@@ -4361,34 +4361,43 @@ def tool_kg_supersede(
     try:
         subject = sanitize_kg_value(subject, "subject")
         predicate = sanitize_name(predicate, "predicate")
+        submitted_predicate = predicate
+        # Write-time policy (same as tool_kg_add), not the lookup resolver used
+        # by tool_kg_invalidate: supersede OPENS a new fact under this
+        # predicate, so a banned or unknown predicate must be refused here or
+        # it lands in the graph unresolved (workspace BACKLOG BC3).
+        predicate, _vocab_action, vocab_note = resolve_predicate(predicate)
         old_object = sanitize_kg_value(old_object, "old_object")
         new_object = sanitize_kg_value(new_object, "new_object")
         at = sanitize_iso_temporal(at, "at")
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
-    _wal_log(
-        "kg_supersede",
-        {
-            "subject": subject,
-            "predicate": predicate,
-            "old_object": old_object,
-            "new_object": new_object,
-            "at": at,
-        },
-    )
+    wal_payload = {
+        "subject": subject,
+        "predicate": predicate,
+        "old_object": old_object,
+        "new_object": new_object,
+        "at": at,
+    }
+    if predicate != submitted_predicate:
+        wal_payload["predicate_submitted"] = submitted_predicate
+    _wal_log("kg_supersede", wal_payload)
 
     # Domain ValueErrors from kg.supersede (e.g. inverted boundary) are left to
     # bubble to the dispatcher, matching tool_kg_add / tool_kg_invalidate: the
     # -32000 response carries error_class + message in error.data. Only input
     # sanitization above returns the {success: False} envelope.
     triple_id = _call_kg(lambda kg: kg.supersede(subject, predicate, old_object, new_object, at=at))
-    return {
+    result = {
         "success": True,
         "triple_id": triple_id,
         "fact": f"{subject} → {predicate} → {new_object}",
         "superseded": old_object,
     }
+    if vocab_note:
+        result["note"] = vocab_note
+    return result
 
 
 def tool_kg_timeline(entity: str = None):
