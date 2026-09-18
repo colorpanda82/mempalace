@@ -4437,7 +4437,9 @@ def tool_kg_stats():
 # ==================== AGENT DIARY ====================
 
 
-def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: str = ""):
+def tool_diary_write(
+    agent_name: str, entry: str, topic: str = "general", wing: str = "", force: bool = False
+):
     """
     Write a diary entry for this agent. Entries are timestamped and
     accumulate over time in a diary room.
@@ -4479,10 +4481,58 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
         return _collection_error_or_no_palace()
 
     now = datetime.now()
-    entry_id = (
-        f"diary_{wing}_{now.strftime('%Y%m%d_%H%M%S%f')}_"
-        f"{hashlib.sha256(entry.encode()).hexdigest()[:12]}"
-    )
+    entry_sha = hashlib.sha256(entry.encode()).hexdigest()[:12]
+    entry_id = f"diary_{wing}_{now.strftime('%Y%m%d_%H%M%S%f')}_{entry_sha}"
+
+    # Refuse to file an entry whose text is already in the palace (CT6).
+    # A 2026-09-17 recovery re-ingested from the abandoned palace over entries
+    # already present and produced 44 byte-identical rows; two identical
+    # drawers both match everything either one matches, so a retrieval slot is
+    # spent twice on the same text.
+    #
+    # Two lookups on purpose. The metadata one is cheap and indexed but only
+    # sees rows written after this patch. The id scan is what catches the case
+    # that actually happened: a fresh ingest colliding with an OLD row, which
+    # carries no entry_sha. Dropping the scan would make this guard useless
+    # against precisely the incident it exists for.
+    if not force:
+        _dupe_of = None
+        try:
+            _hit = col.get(where={"entry_sha": entry_sha}, include=[])
+            _ids = _hit.get("ids") if isinstance(_hit, dict) else None
+            if _ids:
+                _dupe_of = _ids[0]
+        except Exception as _meta_err:  # a where-query failure must not block writes
+            logger.debug("diary dedupe: metadata probe failed: %s", _meta_err)
+        if _dupe_of is None:
+            try:
+                _all = col.get(include=[])
+                for _rid in (_all.get("ids") or []):
+                    _base = _rid.split("_chunk_")[0]
+                    if _base.endswith("_" + entry_sha):
+                        _dupe_of = _rid
+                        break
+            except Exception as _scan_err:
+                logger.debug("diary dedupe: id scan failed: %s", _scan_err)
+        if _dupe_of is not None:
+            logger.info(
+                "Diary entry already present (sha=%s, existing=%s) - skipping",
+                entry_sha,
+                _dupe_of,
+            )
+            return {
+                "success": True,
+                "duplicate": True,
+                "skipped": True,
+                "entry_id": _dupe_of,
+                "entry_sha": entry_sha,
+                "agent": agent_name,
+                "topic": topic,
+                "reason": (
+                    "An entry with identical text is already filed. Pass force=True "
+                    "to file a second copy."
+                ),
+            }
 
     _wal_log(
         "diary_write",
@@ -4510,6 +4560,7 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
             "date": now.strftime("%Y-%m-%d"),
             "source": "mcp",
             "session_id": _MCP_SESSION_ID,
+            "entry_sha": entry_sha,
         }
         chunk_size = _config.chunk_size
         if len(entry) <= chunk_size:
