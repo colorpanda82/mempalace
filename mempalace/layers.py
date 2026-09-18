@@ -229,8 +229,27 @@ class Layer1:
             scored.append((importance, recency, meta, doc))
 
         # Sort by importance desc, then recency (filed_at) desc; take top N.
-        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
-        top = [(imp, meta, doc) for imp, _recency, meta, doc in scored[: self.MAX_DRAWERS]]
+        # F5 (fork): per-namespace decay applied to importance (deboost only, not
+        # delete). Decay derives from age_days vs namespace half-life. Direct
+        # queries (Layer3 search) are unaffected -- this only reshuffles the L1
+        # always-loaded wake-up so stale drawers don't crowd out fresh ones.
+        try:
+            from .janitor import score_drawer as _f5_score_drawer
+        except Exception:
+            _f5_score_drawer = None
+        if _f5_score_drawer is not None:
+            decayed = []
+            for imp, recency, meta, doc in scored:
+                try:
+                    effective = imp * _f5_score_drawer(meta)["recency_weight"]
+                except Exception:
+                    effective = imp
+                decayed.append((effective, recency, meta, doc, imp))
+            decayed.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            top = [(imp_orig, meta, doc) for _eff, _rec, meta, doc, imp_orig in decayed[: self.MAX_DRAWERS]]
+        else:
+            scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            top = [(imp, meta, doc) for imp, _recency, meta, doc in scored[: self.MAX_DRAWERS]]
 
         # Group by room for readability
         by_room = defaultdict(list)

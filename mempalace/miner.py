@@ -636,6 +636,44 @@ def detect_room(filepath: Path, content: str, rooms: list, project_path: Path) -
 # =============================================================================
 
 
+# Section-aware chunking (workspace fork, 2026-09-04). A markdown heading opens a
+# new section; a chunk never straddles one, and every continuation chunk inside a
+# section is prefixed with its heading so the heading's terms embed with the body
+# they describe. Measured before building: 1,659 of 3,010 live drawers (55%) come
+# from documents that produced more than one chunk, and 626 (21%) carry a heading
+# line, so a boundary that cuts a heading from its body was the common case, not
+# the edge case. Only ATX headings (`# ...` to `###### ...`) count; setext and
+# ALL-CAPS lines are deliberately not detected (too many false splits in code and
+# transcripts). Content with no headings chunks exactly as before.
+_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(\S.*?)[ \t]*$", re.MULTILINE)
+
+
+def _section_spans(content: str, min_chunk_size: int) -> list:
+    """Split ``content`` into ``(start, end, heading_text_or_None)`` spans at
+    markdown headings. A heading line belongs to the span it opens. A heading is
+    accepted as a boundary only when the span it would close is at least
+    ``min_chunk_size`` chars, so a run of near-empty headings does not shred the
+    document into sub-minimum fragments that ``chunk_text`` would then drop.
+    Always returns at least one span covering the whole content."""
+    spans = []
+    cur_start = 0
+    cur_heading = None
+    for m in _HEADING_RE.finditer(content):
+        pos = m.start()
+        if pos == 0:
+            cur_heading = m.group(2).strip()
+            continue
+        if pos - cur_start < min_chunk_size:
+            # Too little before this heading to stand alone; fold it into the
+            # section being built and let the next heading try again.
+            continue
+        spans.append((cur_start, pos, cur_heading))
+        cur_start = pos
+        cur_heading = m.group(2).strip()
+    spans.append((cur_start, len(content), cur_heading))
+    return spans
+
+
 def chunk_text(
     content: str,
     source_file: str,
@@ -645,8 +683,15 @@ def chunk_text(
 ) -> list:
     """
     Split content into drawer-sized chunks.
-    Tries to split on paragraph/line boundaries.
-    Returns list of {"content": str, "chunk_index": int, "line_start": int, "line_end": int}
+    Tries to split on paragraph/line boundaries, and never across a markdown
+    heading (see ``_section_spans``).
+    Returns list of {"content": str, "chunk_index": int, "line_start": int,
+    "line_end": int, "section": str | None}. ``section`` is the text of the
+    nearest preceding ATX heading, or None before the first heading / in
+    heading-less content. A continuation chunk (any chunk of a section other
+    than the one that begins at the heading) has ``"<heading line>\\n\\n"``
+    prepended to its ``content``; ``line_start`` / ``line_end`` still describe
+    the source span, not the prefixed text.
 
     ``line_start`` / ``line_end`` are 1-indexed line numbers in the stripped
     source, giving an approximate locator for where the chunk came from.
@@ -721,11 +766,21 @@ def chunk_text(
     _nl_before_end = 0
     _end_anchor = 0
 
-    while start < len(content):
-        end = min(start + chunk_size, len(content))
+    spans = _section_spans(content, min_chunk_size)
+    span_i = 0
 
-        # Try to break at paragraph boundary
-        if end < len(content):
+    while start < len(content):
+        # Advance to the section span that contains ``start``. Spans are
+        # increasing and ``start`` never moves backward across a span (see the
+        # ``max(..., span_start)`` at the bottom of the loop), so this is a
+        # monotonic cursor, not a search.
+        while span_i + 1 < len(spans) and start >= spans[span_i][1]:
+            span_i += 1
+        span_start, span_end, section = spans[span_i]
+        end = min(start + chunk_size, span_end)
+
+        # Try to break at paragraph boundary (within the section)
+        if end < span_end:
             newline_pos = content.rfind("\n\n", start, end)
             if newline_pos > start + chunk_size // 2:
                 end = newline_pos
@@ -758,17 +813,28 @@ def chunk_text(
                 line_end = _nl_before_end + 1
             else:
                 line_end = content.count("\n", 0, end) + 1
+            if section and start > span_start:
+                # Continuation chunk: carry the heading so its terms embed with
+                # the body. The source span (line_start/line_end) is unchanged.
+                nl = content.find("\n", span_start, span_end)
+                heading_line = content[span_start:(nl if nl != -1 else span_end)].strip()
+                chunk = f"{heading_line}\n\n{chunk}"
             chunks.append(
                 {
                     "content": chunk,
                     "chunk_index": chunk_index,
                     "line_start": line_start,
                     "line_end": line_end,
+                    "section": section,
                 }
             )
             chunk_index += 1
 
-        start = end - chunk_overlap if end < len(content) else end
+        if end < span_end:
+            # Overlap stays inside the section: never reach back across a heading.
+            start = max(end - chunk_overlap, span_start)
+        else:
+            start = end
 
     return chunks
 
@@ -1707,8 +1773,13 @@ def _build_drawer_metadata(
     content_date: Optional[str] = None,
     chunk_total: Optional[int] = None,
     content_date_source: Optional[str] = None,
+    section: Optional[str] = None,
 ) -> dict:
     """Build the metadata dict for one drawer without upserting.
+
+    ``section`` — the nearest preceding markdown heading of the chunk (see
+    ``chunk_text``), stored so a retrieval hit can cite "<doc> — <section>"
+    instead of only the document. Absent when None or empty.
 
     Split out from ``add_drawer`` so ``process_file`` can batch all chunks
     of a file into a single ``collection.upsert`` — one embedding forward
@@ -1756,6 +1827,8 @@ def _build_drawer_metadata(
         metadata["content_date_source"] = content_date_source or "unknown"
     if chunk_total is not None:
         metadata["chunk_total"] = chunk_total
+    if section:
+        metadata["section"] = section[:200]
     metadata["hall"] = detect_hall(content)
     entities = _extract_entities_for_metadata(content)
     if entities:
@@ -1942,6 +2015,7 @@ def process_file(
                             content_date=file_content_date,
                             chunk_total=len(chunks),
                             content_date_source=file_content_date_source,
+                            section=chunk.get("section"),
                         )
                     )
                 assert_no_collisions(list(zip(batch_ids, batch_metas)), collection)

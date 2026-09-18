@@ -62,6 +62,8 @@ def main():
     )
 
     sub = parser.add_subparsers(dest="command")
+    from ..cli_workspace import register as _ws_register  # ws-hybrid-hook
+    _ws_register(sub)  # ws-hybrid-hook
 
     # init
     p_init = sub.add_parser("init", help="Detect rooms from your folder structure")
@@ -930,6 +932,30 @@ def main():
         help="Storage backend (default: config/env/detected/chroma)",
     )
 
+    # F5 — Phase 3 self-healing
+    p_rebuild = sub.add_parser(
+        "rebuild-index",
+        help="F8 — raw-text document store stats and re-embed trigger",
+    )
+    p_rebuild.add_argument(
+        "--execute", action="store_true",
+        help="trigger re-embedding (delegates to Jarvis job)",
+    )
+    p_janitor = sub.add_parser("janitor", help="F5 decay scoring (read-only)")
+    p_janitor.add_argument("--wing", default=None)
+    p_janitor.add_argument("--limit", type=int, default=None)
+    p_janitor.add_argument("--backfill", action="store_true",
+                           help="Seed accessed_at=created_at for drawers missing it")
+    p_janitor.add_argument("--apply", action="store_true",
+                           help="Commit backfill writes (default: dry-run)")
+    p_shadow = sub.add_parser("shadow-index", help="F5 HyDE read-only flagging")
+    shadow_sub = p_shadow.add_subparsers(dest="action", required=True)
+    p_sa = shadow_sub.add_parser("audit", help="Sample triples and flag unsupported ones")
+    p_sa.add_argument("--n-samples", type=int, default=20)
+    p_sa.add_argument("--n-results", type=int, default=5)
+    p_sl = shadow_sub.add_parser("list-flagged", help="Show recent flagged triples")
+    p_sl.add_argument("--limit", type=int, default=20)
+
     args = parser.parse_args()
     _apply_backend_arg(args)
 
@@ -938,6 +964,10 @@ def main():
         return
 
     # Handle two-level subcommands
+    from ..cli_workspace import maybe_dispatch as _ws_maybe_dispatch  # ws-hybrid-hook
+    _ws_rc = _ws_maybe_dispatch(args)  # ws-hybrid-hook
+    if _ws_rc is not None:  # ws-hybrid-hook
+        return _ws_rc  # ws-hybrid-hook
     if args.command == "hook":
         if not getattr(args, "hook_action", None):
             p_hook.print_help()
@@ -1008,5 +1038,11 @@ def main():
         "hallways": cmd_hallways,
         "status": cmd_status,
         "update": cmd_update,
+
+        "janitor": cmd_janitor,
+        "shadow-index": cmd_shadow_index,
     }
+    if args.command == "rebuild-index":
+        _cmd_rebuild_index(args)
+        return
     dispatch[args.command](args)

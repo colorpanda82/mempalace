@@ -166,6 +166,8 @@ class TestSearchTool:
 
         def fake_search(*args, **kwargs):
             seen["max_distance"] = kwargs.get("max_distance")
+            seen["candidate_strategy"] = kwargs.get("candidate_strategy")
+            seen["n_results"] = kwargs.get("n_results")
             return {"results": []}
 
         monkeypatch.setattr(mcp_server, "search_memories", fake_search)
@@ -173,7 +175,20 @@ class TestSearchTool:
         result = mcp_server.tool_search(query="needle")
 
         assert "error" not in result
-        assert seen["max_distance"] == 1.5
+        # Fork contract (fusion-depth override): with no caller-set bound the
+        # MCP path retrieves deep with the union strategy and NO distance cap,
+        # because on this corpus the 1.5 default filtered nothing (observed
+        # range 0.16-0.38) and a lexically perfect drawer absent from the
+        # vector pool must still reach fusion. Caller-set bounds are preserved.
+        assert seen["max_distance"] == 0.0
+        assert seen["candidate_strategy"] == "union"
+        assert seen["n_results"] >= 100
+
+        seen.clear()
+        result = mcp_server.tool_search(query="needle", max_distance=0.4)
+        assert "error" not in result
+        assert seen["max_distance"] == 0.4
+        assert seen["candidate_strategy"] == "vector"
 
     def test_search_cli_compatible_reuses_hub_collection(self, monkeypatch, config, kg):
         _patch_mcp_server(monkeypatch, config, kg)

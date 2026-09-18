@@ -2503,7 +2503,11 @@ def test_extract_via_sqlite_returns_all_rows_with_metadata(tmp_path):
     for emb_id, doc, meta in rows:
         got_doc, got_meta = by_id[emb_id]
         assert got_doc == doc, f"document mangled for {emb_id}"
-        assert got_meta == meta, f"metadata mangled for {emb_id}: {got_meta!r}"
+        # Relax to subset check: I4 fork stamps {embedder, dim, indexed_at} on every
+        # upsert; assert the seeded keys/values are present in the returned metadata.
+        assert meta.items() <= got_meta.items(), (
+            f"metadata mangled for {emb_id} (seeded keys missing from actual): {got_meta!r}"
+        )
 
     # Lock the segment-scope assumption directly against Chroma's on-disk
     # layout so a future change that points the extraction JOIN at the
@@ -2683,7 +2687,12 @@ def test_rebuild_from_sqlite_roundtrips_via_real_chromadb(tmp_path):
     assert closets.count() == 1
     closet_row = closets.get(ids=["closet_x"], include=["documents", "metadatas"])
     assert closet_row["documents"] == ["abbrev pointer →drawer_001"]
-    assert closet_row["metadatas"][0] == {"wing": "alpha"}
+    # Relax to subset check: I4 fork stamps {embedder, dim, indexed_at} on every upsert;
+    # assert the seeded "wing" key is present, ignore extra provenance keys.
+    _actual_closet_meta = closet_row["metadatas"][0]
+    assert _actual_closet_meta.get("wing") == "alpha", (
+        f"expected wing='alpha' in closet metadata, got: {_actual_closet_meta!r}"
+    )
 
 
 def test_rebuild_from_sqlite_rebuilds_fts5_after_chroma_closes(tmp_path, monkeypatch):

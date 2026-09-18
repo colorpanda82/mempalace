@@ -673,6 +673,9 @@ def _file_chunks_locked(
                     meta["line_start"] = chunk["line_start"]
                 if chunk.get("line_end") is not None:
                     meta["line_end"] = chunk["line_end"]
+                # Section-aware chunking (fork, 2026-09-04): nearest heading.
+                if chunk.get("section"):
+                    meta["section"] = chunk["section"][:200]
                 # Tier 6a content-date: shared across all chunks of the file.
                 if file_content_date:
                     meta["content_date"] = file_content_date

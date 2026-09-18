@@ -103,7 +103,14 @@ def test_chroma_creation_initializes_last_modified():
     )
 
     assert raw.kwargs is not None
-    assert raw.kwargs["metadatas"] == [
+    # Fork (I4): ChromaCollection.upsert stamps {embedder, dim, indexed_at} on
+    # every write so the drift reconciler can see partial migrations. Strip
+    # those before comparing; the assertion is about last_modified, not them.
+    _stamped = [
+        {k: v for k, v in m.items() if k not in ("embedder", "dim", "indexed_at")}
+        for m in raw.kwargs["metadatas"]
+    ]
+    assert _stamped == [
         {
             "wing": "test",
             "filed_at": CREATED,

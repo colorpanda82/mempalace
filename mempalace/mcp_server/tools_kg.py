@@ -103,25 +103,27 @@ def tool_kg_add(
     try:
         subject = sanitize_kg_value(subject, "subject")
         predicate = sanitize_name(predicate, "predicate")
+        submitted_predicate = predicate
+        predicate, _vocab_action, vocab_note = resolve_predicate(predicate)
         object = sanitize_kg_value(object, "object")
         valid_from = sanitize_iso_temporal(valid_from, "valid_from")
         valid_to = sanitize_iso_temporal(valid_to, "valid_to")
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
-    _wal_log(
-        "kg_add",
-        {
-            "subject": subject,
-            "predicate": predicate,
-            "object": object,
-            "valid_from": valid_from,
-            "valid_to": valid_to,
-            "source_closet": source_closet,
-            "source_file": source_file,
-            "source_drawer_id": source_drawer_id,
-        },
-    )
+    wal_payload = {
+        "subject": subject,
+        "predicate": predicate,
+        "object": object,
+        "valid_from": valid_from,
+        "valid_to": valid_to,
+        "source_closet": source_closet,
+        "source_file": source_file,
+        "source_drawer_id": source_drawer_id,
+    }
+    if predicate != submitted_predicate:
+        wal_payload["predicate_submitted"] = submitted_predicate
+    _wal_log("kg_add", wal_payload)
 
     triple_id = _call_kg(
         lambda kg: kg.add_triple(
@@ -135,7 +137,14 @@ def tool_kg_add(
             source_drawer_id=source_drawer_id,
         )
     )
-    return {"success": True, "triple_id": triple_id, "fact": f"{subject} → {predicate} → {object}"}
+    result = {
+        "success": True,
+        "triple_id": triple_id,
+        "fact": f"{subject} → {predicate} → {object}",
+    }
+    if vocab_note:
+        result["note"] = vocab_note
+    return result
 
 
 def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = None):
@@ -151,6 +160,8 @@ def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = N
     try:
         subject = sanitize_kg_value(subject, "subject")
         predicate = sanitize_name(predicate, "predicate")
+        submitted_predicate = predicate
+        predicate, vocab_note = resolve_predicate_for_lookup(predicate)
         object = sanitize_kg_value(object, "object")
         ended = sanitize_iso_temporal(ended, "ended")
     except ValueError as e:
@@ -158,22 +169,44 @@ def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = N
 
     resolved_ended = ended or date.today().isoformat()
 
-    _wal_log(
-        "kg_invalidate",
-        {
-            "subject": subject,
-            "predicate": predicate,
-            "object": object,
-            "ended": resolved_ended,
-        },
-    )
+    wal_payload = {
+        "subject": subject,
+        "predicate": predicate,
+        "object": object,
+        "ended": resolved_ended,
+    }
+    if predicate != submitted_predicate:
+        wal_payload["predicate_submitted"] = submitted_predicate
+    _wal_log("kg_invalidate", wal_payload)
 
-    _call_kg(lambda kg: kg.invalidate(subject, predicate, object, ended=resolved_ended))
-    return {
+    matched = _call_kg(
+        lambda kg: kg.invalidate(subject, predicate, object, ended=resolved_ended)
+    )
+    matched = int(matched or 0)
+
+    if matched == 0:
+        # Do NOT report success. The UPDATE matched nothing, so the caller's
+        # fact is still live; saying "ended" would be a silent false success.
+        err = (
+            f"no active fact matched {subject!r} -> {predicate!r} -> {object!r}; "
+            "nothing was invalidated"
+        )
+        if predicate != submitted_predicate:
+            err += (
+                f" (submitted predicate {submitted_predicate!r} resolved to "
+                f"{predicate!r}; a fact stored under the original alias would not match)"
+            )
+        return {"success": False, "error": err, "matched": 0}
+
+    result = {
         "success": True,
         "fact": f"{subject} → {predicate} → {object}",
         "ended": resolved_ended,
+        "matched": matched,
     }
+    if vocab_note:
+        result["note"] = vocab_note
+    return result
 
 
 def tool_kg_supersede(
@@ -197,34 +230,43 @@ def tool_kg_supersede(
     try:
         subject = sanitize_kg_value(subject, "subject")
         predicate = sanitize_name(predicate, "predicate")
+        submitted_predicate = predicate
+        # Write-time policy (same as tool_kg_add), not the lookup resolver used
+        # by tool_kg_invalidate: supersede OPENS a new fact under this
+        # predicate, so a banned or unknown predicate must be refused here or
+        # it lands in the graph unresolved (workspace BACKLOG BC3).
+        predicate, _vocab_action, vocab_note = resolve_predicate(predicate)
         old_object = sanitize_kg_value(old_object, "old_object")
         new_object = sanitize_kg_value(new_object, "new_object")
         at = sanitize_iso_temporal(at, "at")
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
-    _wal_log(
-        "kg_supersede",
-        {
-            "subject": subject,
-            "predicate": predicate,
-            "old_object": old_object,
-            "new_object": new_object,
-            "at": at,
-        },
-    )
+    wal_payload = {
+        "subject": subject,
+        "predicate": predicate,
+        "old_object": old_object,
+        "new_object": new_object,
+        "at": at,
+    }
+    if predicate != submitted_predicate:
+        wal_payload["predicate_submitted"] = submitted_predicate
+    _wal_log("kg_supersede", wal_payload)
 
     # Domain ValueErrors from kg.supersede (e.g. inverted boundary) are left to
     # bubble to the dispatcher, matching tool_kg_add / tool_kg_invalidate: the
     # -32000 response carries error_class + message in error.data. Only input
     # sanitization above returns the {success: False} envelope.
     triple_id = _call_kg(lambda kg: kg.supersede(subject, predicate, old_object, new_object, at=at))
-    return {
+    result = {
         "success": True,
         "triple_id": triple_id,
         "fact": f"{subject} → {predicate} → {new_object}",
         "superseded": old_object,
     }
+    if vocab_note:
+        result["note"] = vocab_note
+    return result
 
 
 def tool_kg_timeline(entity: str = None, limit: int = 100, offset: int = 0):

@@ -127,6 +127,19 @@ from ..logstream import LOGSTREAM_DB_FILENAME, Logstream  # noqa: E402
 from ..collision_scan import assert_no_collisions  # noqa: E402
 from ..ids import ID_RECIPE, make_drawer_id_from_content  # noqa: E402
 
+# F8/Phase-B: model name stamped into documents-table provenance and drawer
+# metadata. Matches EmbeddinggemmaONNX.name() ("embeddinggemma_300m"). Plain
+# string only; the legacy Ollama embed shim is intentionally gone -- eg-384
+# embeds via the ChromaDB embedding function. (fork; lives here so every
+# exec'd fragment below sees it in the shared namespace)
+_DEFAULT_EMBED_MODEL = "embeddinggemma_300m"
+
+# I6: content validation + per-process MCP session id for write provenance (2C).
+import uuid as _uuid  # noqa: E402
+from ..content_validator import validate_content, quarantine_content, wrap_long_lines  # noqa: E402
+from ..kg_vocabulary import resolve_predicate, resolve_predicate_for_lookup  # noqa: E402
+_MCP_SESSION_ID = _uuid.uuid4().hex[:12]
+
 # ==================== WRITE-AHEAD LOG ====================
 # Every write operation is logged to a JSONL file before execution.
 # This provides an audit trail for detecting memory poisoning and

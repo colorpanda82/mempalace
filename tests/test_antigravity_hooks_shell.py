@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -32,6 +33,16 @@ HOOKS_DIR = REPO_ROOT / "hooks" / "antigravity"
 SAVE_HOOK = HOOKS_DIR / "mempal_save_hook_antigravity.sh"
 WAKE_HOOK = HOOKS_DIR / "mempal_wake_hook_antigravity.sh"
 COMMON_LIB = HOOKS_DIR / "lib" / "common.sh"
+
+# Shell-safe forms of the paths above. These get interpolated into `bash -c`
+# strings, where an unquoted path word-splits: a checkout under e.g.
+# "/Volumes/Jarvis Working/..." or "~/Google Drive/..." makes bash try to source
+# "/Volumes/Jarvis", so every function in the library is then "command not found"
+# and the assertions compare against an empty string. shlex.quote handles every
+# metacharacter, not just the space that happens to expose it.
+COMMON_LIB_SH = shlex.quote(str(COMMON_LIB))
+SAVE_HOOK_SH = shlex.quote(str(SAVE_HOOK))
+WAKE_HOOK_SH = shlex.quote(str(WAKE_HOOK))
 
 # Skip the entire module on Windows — bash 3.2+ is required.
 pytestmark = pytest.mark.skipif(
@@ -392,7 +403,7 @@ def test_common_sh_parser_omits_sentinel_on_malformed_json(tmp_path: Path) -> No
     _ensure_palace(home)
     state.mkdir(parents=True, exist_ok=True)
     # Source the lib and call mempal_parse_stdin with malformed JSON.
-    cmd = f". {COMMON_LIB}; mempal_parse_stdin '{{not even close to json{{'"
+    cmd = f". {COMMON_LIB_SH}; mempal_parse_stdin '{{not even close to json{{'"
     result = subprocess.run(
         ["bash", "-c", cmd],
         capture_output=True,
@@ -979,7 +990,7 @@ def test_gc_removes_stale_state_files(tmp_path: Path) -> None:
     log.write_text("log line\n", encoding="utf-8")
     _backdate(log, 99)
 
-    cmd = f". {COMMON_LIB}; mempal_gc_stale_state"
+    cmd = f". {COMMON_LIB_SH}; mempal_gc_stale_state"
     result = subprocess.run(
         ["bash", "-c", cmd],
         capture_output=True,
@@ -1011,7 +1022,7 @@ def test_gc_is_throttled_to_once_per_day(tmp_path: Path) -> None:
     stale_count.write_text("7", encoding="utf-8")
     _backdate(stale_count, 40)
 
-    cmd = f". {COMMON_LIB}; mempal_gc_stale_state"
+    cmd = f". {COMMON_LIB_SH}; mempal_gc_stale_state"
     result = subprocess.run(
         ["bash", "-c", cmd],
         capture_output=True,
@@ -1041,7 +1052,7 @@ def test_gc_runs_when_marker_is_stale(tmp_path: Path) -> None:
     stale_count.write_text("7", encoding="utf-8")
     _backdate(stale_count, 40)
 
-    cmd = f". {COMMON_LIB}; mempal_gc_stale_state"
+    cmd = f". {COMMON_LIB_SH}; mempal_gc_stale_state"
     result = subprocess.run(
         ["bash", "-c", cmd],
         capture_output=True,
@@ -1065,7 +1076,7 @@ def test_state_ttl_days_floors_and_strips(tmp_path: Path) -> None:
         else:
             env["MEMPAL_STATE_TTL_DAYS"] = value
         out = subprocess.run(
-            ["bash", "-c", f". {COMMON_LIB}; mempal_state_ttl_days"],
+            ["bash", "-c", f". {COMMON_LIB_SH}; mempal_state_ttl_days"],
             capture_output=True,
             text=True,
             env=env,
@@ -1138,7 +1149,7 @@ def test_gc_does_not_run_under_kill_switch(tmp_path: Path) -> None:
 def _resolve_python(env: dict[str, str]) -> str:
     """Source common.sh under ``env`` and return the resolved MEMPAL_PYTHON_BIN."""
     out = subprocess.run(
-        ["bash", "-c", f'. {COMMON_LIB}; printf "%s" "$MEMPAL_PYTHON_BIN"'],
+        ["bash", "-c", f'. {COMMON_LIB_SH}; printf "%s" "$MEMPAL_PYTHON_BIN"'],
         capture_output=True,
         text=True,
         env=env,
