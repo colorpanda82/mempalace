@@ -3229,6 +3229,44 @@ def _collapse_drawer_rows(ids, documents, metadatas):
     return drawers
 
 
+def _chunk_spans(content: str, chunk_size: int):
+    """Slice ``content`` into ``(start, text)`` spans, merging a runt tail.
+
+    THE ONE SLICER. Three call sites built this loop independently --
+    ``_build_chunk_rows``, ``tool_add_drawer``'s oversized branch and
+    ``tool_diary_write``'s entry branch -- and the 2026-07-22 min_chunk_size
+    fix (6edaa68) landed in only the first. Measured 2026-09-18: 53 runt
+    chunks in the live palace, 31 from the add_drawer path and 22 from the
+    diary path, zero from the patched one. The arithmetic matched exactly,
+    which is how the two unpatched copies were found. Keep this the only
+    place ``range(0, len(x), chunk_size)`` appears for drawer content.
+
+    A fixed-width slice leaves a runt tail (1601 chars -> 800/800/1). Such a
+    chunk carries no retrievable meaning and behaves as a hub vector:
+    measured 2026-07-22, 34 sub-50-char chunks took 25% of vector top-5 slots
+    on exact-term queries, and a bare newline outscored every correct hit.
+    Merge rather than drop -- on a diary drawer the tail is the provenance
+    footer, so dropping would lose data. chunk_index stays positional, so
+    indices remain contiguous.
+    """
+    chunk_size = max(1, int(chunk_size or 1))
+    if content == "":
+        return [(0, "")]
+
+    spans = [
+        (start, content[start : start + chunk_size])
+        for start in range(0, len(content), chunk_size)
+    ]
+
+    min_chunk = max(0, int(getattr(_config, "min_chunk_size", 50) or 0))
+    if len(spans) > 1 and len(spans[-1][1]) < min_chunk:
+        _, tail = spans.pop()
+        pstart, pdoc = spans[-1]
+        spans[-1] = (pstart, pdoc + tail)
+
+    return spans
+
+
 def _build_chunk_rows(drawer_id: str, content: str, meta: dict, chunk_size: int):
     chunk_size = max(1, int(chunk_size or 1))
 
@@ -3236,27 +3274,7 @@ def _build_chunk_rows(drawer_id: str, content: str, meta: dict, chunk_size: int)
     base_meta.pop("chunk_index", None)
     base_meta["parent_drawer_id"] = drawer_id
 
-    spans = (
-        [(0, "")]
-        if content == ""
-        else [
-            (start, content[start : start + chunk_size])
-            for start in range(0, len(content), chunk_size)
-        ]
-    )
-
-    # A fixed-width slice leaves a runt tail (1601 chars -> 800/800/1). Such a chunk
-    # carries no retrievable meaning and behaves as a hub vector: measured 2026-07-22,
-    # 34 sub-50-char chunks took 25% of vector top-5 slots on exact-term queries, and a
-    # bare newline outscored every correct hit. config declares min_chunk_size (default
-    # 50) for exactly this; this MCP path never applied it, while miner.py:582 does.
-    # Merge rather than drop -- for a diary drawer the tail is the provenance footer, so
-    # dropping would lose data. chunk_index is positional, so indices stay contiguous.
-    _min_chunk = max(0, int(getattr(_config, "min_chunk_size", 50) or 0))
-    if len(spans) > 1 and len(spans[-1][1]) < _min_chunk:
-        _, _tail = spans.pop()
-        _pstart, _pdoc = spans[-1]
-        spans[-1] = (_pstart, _pdoc + _tail)
+    spans = _chunk_spans(content, chunk_size)
 
     chunk_ids = []
     chunk_docs = []
@@ -3403,10 +3421,10 @@ def tool_add_drawer(
         chunk_ids: list[str] = []
         chunk_docs: list[str] = []
         chunk_metas: list[dict] = []
-        for i in range(0, len(content), chunk_size):
+        for i, chunk_doc in _chunk_spans(content, chunk_size):
             chunk_idx = i // chunk_size
             chunk_ids.append(f"{drawer_id}_chunk_{chunk_idx:06d}")
-            chunk_docs.append(content[i : i + chunk_size])
+            chunk_docs.append(chunk_doc)
             chunk_metas.append(
                 {**base_meta, "chunk_index": chunk_idx, "parent_drawer_id": drawer_id}
             )
@@ -4535,10 +4553,10 @@ def tool_diary_write(agent_name: str, entry: str, topic: str = "general", wing: 
         chunk_ids: list[str] = []
         chunk_docs: list[str] = []
         chunk_metas: list[dict] = []
-        for i in range(0, len(entry), chunk_size):
+        for i, chunk_doc in _chunk_spans(entry, chunk_size):
             chunk_idx = i // chunk_size
             chunk_ids.append(f"{entry_id}_chunk_{chunk_idx:06d}")
-            chunk_docs.append(entry[i : i + chunk_size])
+            chunk_docs.append(chunk_doc)
             chunk_metas.append(
                 {
                     **base_metadata,
