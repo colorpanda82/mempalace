@@ -36,6 +36,11 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
     if direction not in ("outgoing", "incoming", "both"):
         return {"error": "direction must be 'outgoing', 'incoming', or 'both'"}
 
+    entity, entity_note = resolve_entity(
+        entity,
+        fact_count=lambda n: len(_call_kg(lambda kg: kg.query_entity(n, direction=direction))),
+    )
+
     results = _call_kg(lambda kg: kg.query_entity(entity, as_of=as_of, direction=direction))
     if as_of is None:
         now_key = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -78,6 +83,8 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
         candidates = _call_kg(lambda kg: kg.find_entity_candidates(entity))
         if candidates:
             payload["candidates"] = candidates
+    if entity_note:
+        payload["resolved_entity"] = entity_note
     return payload
 
 
@@ -111,6 +118,16 @@ def tool_kg_add(
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
+    submitted_subject = subject
+    subject, subject_note = resolve_entity(
+        subject, fact_count=lambda n: len(_call_kg(lambda kg: kg.query_entity(n, direction="both")))
+    )
+    submitted_object = object
+    object, object_note = resolve_entity(
+        object, fact_count=lambda n: len(_call_kg(lambda kg: kg.query_entity(n, direction="both")))
+    )
+    entity_notes = [n for n in (subject_note, object_note) if n]
+
     wal_payload = {
         "subject": subject,
         "predicate": predicate,
@@ -123,6 +140,10 @@ def tool_kg_add(
     }
     if predicate != submitted_predicate:
         wal_payload["predicate_submitted"] = submitted_predicate
+    if subject != submitted_subject:
+        wal_payload["subject_submitted"] = submitted_subject
+    if object != submitted_object:
+        wal_payload["object_submitted"] = submitted_object
     _wal_log("kg_add", wal_payload)
 
     triple_id = _call_kg(
@@ -144,6 +165,8 @@ def tool_kg_add(
     }
     if vocab_note:
         result["note"] = vocab_note
+    if entity_notes:
+        result["resolved_entity"] = "; ".join(entity_notes)
     return result
 
 
@@ -167,6 +190,16 @@ def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = N
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
+    submitted_subject = subject
+    subject, subject_note = resolve_entity(
+        subject, fact_count=lambda n: len(_call_kg(lambda kg: kg.query_entity(n, direction="both")))
+    )
+    submitted_object = object
+    object, object_note = resolve_entity(
+        object, fact_count=lambda n: len(_call_kg(lambda kg: kg.query_entity(n, direction="both")))
+    )
+    entity_notes = [n for n in (subject_note, object_note) if n]
+
     resolved_ended = ended or date.today().isoformat()
 
     wal_payload = {
@@ -177,6 +210,10 @@ def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = N
     }
     if predicate != submitted_predicate:
         wal_payload["predicate_submitted"] = submitted_predicate
+    if subject != submitted_subject:
+        wal_payload["subject_submitted"] = submitted_subject
+    if object != submitted_object:
+        wal_payload["object_submitted"] = submitted_object
     _wal_log("kg_invalidate", wal_payload)
 
     matched = _call_kg(
@@ -206,6 +243,8 @@ def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = N
     }
     if vocab_note:
         result["note"] = vocab_note
+    if entity_notes:
+        result["resolved_entity"] = "; ".join(entity_notes)
     return result
 
 
@@ -242,6 +281,20 @@ def tool_kg_supersede(
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
+    submitted_subject = subject
+    subject, subject_note = resolve_entity(
+        subject, fact_count=lambda n: len(_call_kg(lambda kg: kg.query_entity(n, direction="both")))
+    )
+    submitted_old_object = old_object
+    old_object, old_object_note = resolve_entity(
+        old_object, fact_count=lambda n: len(_call_kg(lambda kg: kg.query_entity(n, direction="both")))
+    )
+    submitted_new_object = new_object
+    new_object, new_object_note = resolve_entity(
+        new_object, fact_count=lambda n: len(_call_kg(lambda kg: kg.query_entity(n, direction="both")))
+    )
+    entity_notes = [n for n in (subject_note, old_object_note, new_object_note) if n]
+
     wal_payload = {
         "subject": subject,
         "predicate": predicate,
@@ -251,6 +304,12 @@ def tool_kg_supersede(
     }
     if predicate != submitted_predicate:
         wal_payload["predicate_submitted"] = submitted_predicate
+    if subject != submitted_subject:
+        wal_payload["subject_submitted"] = submitted_subject
+    if old_object != submitted_old_object:
+        wal_payload["old_object_submitted"] = submitted_old_object
+    if new_object != submitted_new_object:
+        wal_payload["new_object_submitted"] = submitted_new_object
     _wal_log("kg_supersede", wal_payload)
 
     # Domain ValueErrors from kg.supersede (e.g. inverted boundary) are left to
@@ -266,6 +325,8 @@ def tool_kg_supersede(
     }
     if vocab_note:
         result["note"] = vocab_note
+    if entity_notes:
+        result["resolved_entity"] = "; ".join(entity_notes)
     return result
 
 
