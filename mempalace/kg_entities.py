@@ -42,23 +42,51 @@ against the store; it never touches the store itself.
 
 Order of resolution, per ``resolve_entity(name)``:
   1. Exact ``MERGES`` hit (case/space/underscore-normalized key match) ->
-     the recorded canonical name. Applies even when the name-as-given
-     already has facts -- a stray write under the old name after a merge
-     decision must still resolve forward.
+     the recorded canonical name -- UNLESS ``prefer_literal_if_present`` is
+     set and the literal name already holds its own fact(s) (see below).
   2. Otherwise, if the name-as-given has NO facts in the store but a
      hyphen/underscore/space variant of it DOES, resolve to that variant
-     (the one with the most facts, if more than one candidate has any).
+     (the one with the most facts; an equal-count tie is named as a tie,
+     never claimed as "most", and broken alphabetically).
   3. Otherwise, the name is returned unchanged.
 
 ``FLAGGED_NOT_MERGED_PAIRS`` is consulted before any resolution from step 1
 or step 2 is returned: if the (name, resolved) pair is one of these,
-resolution is refused and the name is returned unchanged. None of the
-entity_aliases_v1.json flagged pairs are actually hyphen/underscore/space
-variants of each other (they differ by suffix, by a dot, or are unrelated
-machines), so in practice this guard is defense-in-depth rather than
-something the algorithm would otherwise hit -- but it is unconditional, so
-a future addition to the flagged list is honored even if it later WOULD
-collide with the variant heuristic.
+resolution is refused and the name is returned unchanged.
+
+``prefer_literal_if_present`` (added in the F2 hardening pass): callers that
+target a SPECIFIC EXISTING fact by exact identity -- ``kg_invalidate``'s
+subject/object, and ``kg_supersede``'s subject/old_object -- must pass this
+as True. Redirecting those to a merge target when the literal name already
+holds the fact would silently operate on the wrong node: the invalidate/
+supersede would report "no match" or, worse, close/open the wrong triple,
+while the caller's actual fact sits untouched under the literal alias.
+``kg_query``, ``kg_add``, and ``kg_supersede``'s new_object are WRITE-forward
+uses (like a merge should) and keep the default (False): the merge still
+applies even when the alias holds a stray fact, and when it does, a warning
+is appended to the note rather than silently orphaning that stray fact.
+
+``fact_count`` (added in the F1 hardening pass) MUST be an EXACT, non-fuzzy
+counter -- e.g. ``KnowledgeGraph.timeline_total``, which counts
+``WHERE subject = ? OR object = ?`` with no fallback. ``KnowledgeGraph.
+query_entity`` is NOT safe to use here: upstream (confirmed present
+verbatim on the v3.10.0 tag, not a fork addition) has a single-candidate
+fuzzy fallback that, when the exact id has zero rows, silently borrows the
+one nearest LIKE-matched entity's facts and returns them as if they
+belonged to the queried name. Wiring ``fact_count`` to ``query_entity``
+therefore let a nonexistent spelling appear to "have facts" (reproduced:
+``foo-bar`` resolved to ``foo_bar`` when only ``foo_bar_baz`` existed; a
+literal date ``2026-09-23`` resolved to ``2026_09_23`` against a
+``2026_09_23_standup`` sibling), and ``kg_add`` then created a real node
+under a spelling nobody typed and nobody has facts for. That upstream
+fallback is intentional single-candidate-disambiguation behaviour for
+``query_entity``'s own normal callers and is not touched here; the fix is
+entirely on our side, in which counting primitive the resolver is handed.
+Because ``timeline_total`` counts both directions unconditionally, this
+also fixes the F4 direction-scoping bug: the old wiring reused the
+caller's requested ``direction`` for the existence check, so an entity
+holding only incoming facts read as empty under ``direction="outgoing"``
+and a real variant went unresolved.
 """
 
 import re
@@ -115,14 +143,19 @@ def _flagged(a: str, b: str) -> bool:
     return pair in FLAGGED_NOT_MERGED_PAIRS
 
 
-def resolve_entity(name: str, *, fact_count=None):
+def resolve_entity(name: str, *, fact_count=None, prefer_literal_if_present: bool = False):
     """Resolve ``name`` to its canonical/existing spelling.
 
     ``fact_count`` is an injected callable, ``fact_count(candidate) -> int``,
-    consulted only for step 2 (variant lookup) and only when the name as
-    given has no facts. It is the caller's read-only lookup against the
-    store (e.g. ``len(kg.query_entity(candidate, direction="both"))``).
-    Omitting it skips step 2 entirely; step 1 (merges) still applies.
+    that MUST be an exact-id counter (see module docstring) -- callers wire
+    this to ``KnowledgeGraph.timeline_total``, never to ``query_entity``.
+    It is read-only against the store; omitting it skips step 2 entirely
+    and skips the literal-facts check in step 1, but step 1's plain merge
+    redirect still applies.
+
+    ``prefer_literal_if_present``: set True for callers that target an
+    existing fact by exact identity (kg_invalidate's subject/object,
+    kg_supersede's subject/old_object). See module docstring.
 
     Returns ``(canonical_name, note_or_None)``.
     """
@@ -131,12 +164,33 @@ def resolve_entity(name: str, *, fact_count=None):
     original = str(name)
     key = _normkey(original)
 
-    # -- 1. exact merges hit, unconditional on whether `original` has facts
+    # -- 1. exact merges hit ---------------------------------------------
     if key in MERGES:
         target = MERGES[key]
-        if target != original and not _flagged(original, target):
-            return target, f"entity {original!r} resolved to {target!r} (recorded merge)"
-        return original, None
+        if target == original or _flagged(original, target):
+            return original, None
+
+        literal_count = 0
+        if fact_count is not None:
+            try:
+                literal_count = fact_count(original) or 0
+            except Exception:
+                literal_count = 0
+
+        if literal_count and prefer_literal_if_present:
+            return original, (
+                f"entity {original!r} has {literal_count} fact(s) of its own "
+                f"and was NOT redirected to recorded merge target {target!r}; "
+                f"operate on {target!r} directly to affect the merged history"
+            )
+
+        note = f"entity {original!r} resolved to {target!r} (recorded merge)"
+        if literal_count:
+            note += (
+                f"; warning: {original!r} itself still holds {literal_count} "
+                f"fact(s) under the un-merged alias (never auto-migrated)"
+            )
+        return target, note
 
     # -- 2. hyphen/underscore/space variant, only when `original` has none
     if fact_count is None:
@@ -173,7 +227,15 @@ def resolve_entity(name: str, *, fact_count=None):
 
     scored.sort(key=lambda t: (-t[0], t[1]))
     best_count, best = scored[0]
-    if len(scored) > 1:
+    tied = sorted(c for n, c in scored if n == best_count)
+
+    if len(tied) > 1:
+        note = (
+            f"entity {original!r} has no facts; {len(tied)} candidates tie at "
+            f"{best_count} fact(s) each ({', '.join(tied)}); resolved to "
+            f"{best!r} (tie-break: alphabetically first spelling)"
+        )
+    elif len(scored) > 1:
         note = (
             f"entity {original!r} has no facts; resolved to existing variant "
             f"{best!r} ({best_count} facts, most of {len(scored)} candidates)"

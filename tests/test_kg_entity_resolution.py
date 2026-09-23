@@ -230,3 +230,157 @@ class TestEntityResolutionEndToEnd:
         assert result["entity"] == "research-scout"
         assert result["count"] == 1
         assert "resolved_entity" in result
+
+
+# ==========================================================================
+# Hardening round 2 (adversarial review of 7b3ae40): F1/F2/F4/F5.
+# These construct real KnowledgeGraph state and exercise the actual TOOL
+# wiring (not a mocked fact_count) wherever the bug lives in the wiring
+# itself, per the review's requirement to test against a real KG.
+# ==========================================================================
+
+
+class TestFuzzyLeakGuard:
+    """F1: kg.query_entity's single-candidate fuzzy fallback must never
+    leak into fact_count, or a candidate spelling with no node of its own
+    borrows another entity's facts and kg_add creates a phantom node."""
+
+    def test_foo_bar_baz_fuzzy_trap_does_not_create_a_phantom_node(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        from tests.test_mcp_server import _patch_mcp_server
+
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_kg_add
+
+        # Seed ONLY foo_bar_baz. foo_bar and foo-bar have no node at all.
+        kg.add_triple("foo_bar_baz", "is_a", "seed")
+
+        result = tool_kg_add(subject="foo-bar", predicate="is_a", object="thing")
+        assert result["success"] is True
+        assert "resolved_entity" not in result, (
+            "foo-bar has no EXACT facts of its own or of a real variant; "
+            "query_entity's single-candidate fuzzy fallback against "
+            "foo_bar_baz must not count as a hit"
+        )
+        assert kg.timeline_total("foo-bar") == 1
+        assert kg.timeline_total("foo_bar") == 0, (
+            "a phantom 'foo_bar' node must not be created from the fuzzy leak"
+        )
+
+    def test_date_like_literal_is_not_rewritten_by_a_fuzzy_sibling(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        from tests.test_mcp_server import _patch_mcp_server
+
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_kg_add
+
+        # A real underscore-separated sibling that a fuzzy LIKE match could
+        # borrow from if fact_count is not exact-id.
+        kg.add_triple("2026_09_23_standup", "is_a", "seed")
+
+        result = tool_kg_add(subject="x", predicate="noted_on", object="2026-09-23")
+        assert result["success"] is True
+        assert "resolved_entity" not in result
+        assert kg.timeline_total("2026-09-23") == 1
+        assert kg.timeline_total("2026_09_23") == 0
+
+
+class TestAliasHeldFactsNotRedirected:
+    """F2: kg_invalidate/kg_supersede must operate on the literal name when
+    it already holds the fact being targeted, even if that literal is a
+    recorded merge alias -- redirecting would silently fail to find/close
+    the fact and misreport success."""
+
+    def test_invalidate_operates_on_the_alias_that_actually_holds_the_fact(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        from tests.test_mcp_server import _patch_mcp_server
+
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_kg_invalidate
+
+        # Written directly under the alias spelling, bypassing resolution --
+        # simulates a pre-existing fact from before the resolver existed.
+        kg.add_triple("research_scout", "version", "1.0")
+
+        result = tool_kg_invalidate(subject="research_scout", predicate="version", object="1.0")
+        assert result["success"] is True, result
+        assert result["matched"] == 1
+        assert "resolved_entity" in result, "must say the merge target was not used"
+
+        facts = kg.query_entity("research_scout", direction="both")
+        assert len(facts) == 1 and facts[0]["current"] is False
+        assert kg.timeline_total("research-scout") == 0, (
+            "nothing should have been created under the canonical name"
+        )
+
+    def test_supersede_operates_on_the_alias_that_actually_holds_the_fact(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        from tests.test_mcp_server import _patch_mcp_server
+
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_kg_supersede
+
+        kg.add_triple("research_scout", "version", "1.0")
+
+        result = tool_kg_supersede(
+            subject="research_scout", predicate="version", old_object="1.0", new_object="2.0"
+        )
+        assert result["success"] is True, result
+
+        old_fact = [
+            f for f in kg.query_entity("research_scout", direction="both") if f["object"] == "1.0"
+        ]
+        assert old_fact and old_fact[0]["current"] is False, (
+            "the old fact under the alias must actually be closed"
+        )
+        new_fact = [
+            f for f in kg.query_entity("research_scout", direction="both") if f["object"] == "2.0"
+        ]
+        assert new_fact and new_fact[0]["current"] is True
+
+
+class TestDirectionInsensitiveCounting:
+    """F4: the resolver's own fact-existence check must never be scoped to
+    the caller's requested query direction, or an entity with only
+    incoming facts reads as empty and a real variant goes unfound."""
+
+    def test_kg_query_resolves_an_entity_with_only_incoming_facts(
+        self, monkeypatch, config, palace_path, kg
+    ):
+        from tests.test_mcp_server import _patch_mcp_server
+
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_kg_query
+
+        # aa_bb has ONLY an incoming fact; aa-bb has no node at all.
+        kg.add_triple("zz_source", "part_of", "aa_bb")
+
+        result = tool_kg_query(entity="aa-bb", direction="outgoing")
+        assert result["entity"] == "aa_bb", (
+            "resolution must find aa_bb's incoming-only fact even though "
+            "the caller asked for direction=outgoing"
+        )
+        assert "resolved_entity" in result
+
+
+class TestTieIsNamedNotClaimedAsMost:
+    """F5: an equal-count tie must say 'tie' and name the tie-break rule,
+    never claim 'most'."""
+
+    def test_equal_count_candidates_are_reported_as_a_tie(self, kg):
+        kg.add_triple("a_b_c", "is_a", "seed1")
+        kg.add_triple("a-b-c", "is_a", "seed2")
+
+        from mempalace.kg_entities import resolve_entity
+
+        resolved, note = resolve_entity(
+            "a-b_c", fact_count=lambda n: kg.timeline_total(n)
+        )
+        assert resolved == "a-b-c", "alphabetically-first tie-break"
+        assert note is not None
+        assert "tie" in note.lower()
+        assert "most" not in note.lower()

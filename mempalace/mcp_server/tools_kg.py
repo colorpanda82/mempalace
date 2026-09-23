@@ -38,7 +38,7 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
 
     entity, entity_note = resolve_entity(
         entity,
-        fact_count=lambda n: len(_call_kg(lambda kg: kg.query_entity(n, direction=direction))),
+        fact_count=lambda n: _call_kg(lambda kg: kg.timeline_total(n)),
     )
 
     results = _call_kg(lambda kg: kg.query_entity(entity, as_of=as_of, direction=direction))
@@ -120,11 +120,11 @@ def tool_kg_add(
 
     submitted_subject = subject
     subject, subject_note = resolve_entity(
-        subject, fact_count=lambda n: len(_call_kg(lambda kg: kg.query_entity(n, direction="both")))
+        subject, fact_count=lambda n: _call_kg(lambda kg: kg.timeline_total(n))
     )
     submitted_object = object
     object, object_note = resolve_entity(
-        object, fact_count=lambda n: len(_call_kg(lambda kg: kg.query_entity(n, direction="both")))
+        object, fact_count=lambda n: _call_kg(lambda kg: kg.timeline_total(n))
     )
     entity_notes = [n for n in (subject_note, object_note) if n]
 
@@ -190,13 +190,21 @@ def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = N
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
+    # F2: invalidate targets a SPECIFIC existing fact by exact identity --
+    # if the literal subject/object already holds it, operate on the
+    # literal, never redirect to a merge target that would silently match
+    # nothing (or the wrong triple).
     submitted_subject = subject
     subject, subject_note = resolve_entity(
-        subject, fact_count=lambda n: len(_call_kg(lambda kg: kg.query_entity(n, direction="both")))
+        subject,
+        fact_count=lambda n: _call_kg(lambda kg: kg.timeline_total(n)),
+        prefer_literal_if_present=True,
     )
     submitted_object = object
     object, object_note = resolve_entity(
-        object, fact_count=lambda n: len(_call_kg(lambda kg: kg.query_entity(n, direction="both")))
+        object,
+        fact_count=lambda n: _call_kg(lambda kg: kg.timeline_total(n)),
+        prefer_literal_if_present=True,
     )
     entity_notes = [n for n in (subject_note, object_note) if n]
 
@@ -281,17 +289,25 @@ def tool_kg_supersede(
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
+    # F2: subject/old_object identify the EXISTING fact being closed -- if
+    # the literal already holds it, operate on the literal (same rationale
+    # as tool_kg_invalidate). new_object is the value being WRITTEN, so it
+    # keeps the forward-merge policy used by tool_kg_add.
     submitted_subject = subject
     subject, subject_note = resolve_entity(
-        subject, fact_count=lambda n: len(_call_kg(lambda kg: kg.query_entity(n, direction="both")))
+        subject,
+        fact_count=lambda n: _call_kg(lambda kg: kg.timeline_total(n)),
+        prefer_literal_if_present=True,
     )
     submitted_old_object = old_object
     old_object, old_object_note = resolve_entity(
-        old_object, fact_count=lambda n: len(_call_kg(lambda kg: kg.query_entity(n, direction="both")))
+        old_object,
+        fact_count=lambda n: _call_kg(lambda kg: kg.timeline_total(n)),
+        prefer_literal_if_present=True,
     )
     submitted_new_object = new_object
     new_object, new_object_note = resolve_entity(
-        new_object, fact_count=lambda n: len(_call_kg(lambda kg: kg.query_entity(n, direction="both")))
+        new_object, fact_count=lambda n: _call_kg(lambda kg: kg.timeline_total(n))
     )
     entity_notes = [n for n in (subject_note, old_object_note, new_object_note) if n]
 
