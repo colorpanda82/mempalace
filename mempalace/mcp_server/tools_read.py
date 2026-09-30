@@ -452,7 +452,7 @@ def tool_list_wings():
 
 def tool_list_rooms(wing: str = None):
     try:
-        wing = _sanitize_optional_name(wing, "wing")
+        wing = _read_wing(_sanitize_optional_name(wing, "wing"))  # DR41
     except ValueError as e:
         return {"error": str(e)}
     fast = _sqlite_taxonomy()
@@ -559,6 +559,82 @@ def tool_get_taxonomy():
     return result
 
 
+# DR30 (fork, 2026-09-30): fusion depth and drawer-level dedupe for tool_search.
+# search_memories fetches 3x ``n_results`` vector candidates, keeps the top
+# ``n_results`` by distance, merges 3x ``n_results`` BM25 candidates, then
+# hybrid-ranks. With a fixed depth of 100 the vector pool was 300 whatever the
+# caller's limit, and after ~100 old diaries were re-filed on 2026-09-17 the
+# expected drawers for golden rows 10 and 32 fell outside it (Recall@5 on the
+# original 40 rows 40/40 -> 37/40). Measured on the live palace 2026-09-30 over
+# the 21 golden search rows: depth 100 -> 18/21, 150 -> 19/21, 200 -> 20/21,
+# 300 -> 20/21; p50 89 / 94 / 105 / 130 ms. So the floor is 200 (pool 600),
+# scaling with the limit and capped at 400 (pool 1200) so limit=100 stays bounded.
+# No recency bias here: that changes what "relevant" means and is a separate call.
+_SEARCH_DEPTH_FLOOR = 200
+_SEARCH_DEPTH_PER_RESULT = 4
+_SEARCH_DEPTH_CAP = 400
+
+
+def _search_depth(limit) -> int:
+    """Fusion depth handed to search_memories as ``n_results`` (pool = 3x this)."""
+    try:
+        n = int(limit or 5)
+    except (TypeError, ValueError):
+        n = 5
+    return min(max(n * _SEARCH_DEPTH_PER_RESULT, _SEARCH_DEPTH_FLOOR), _SEARCH_DEPTH_CAP)
+
+
+def _dedupe_by_drawer(hits):
+    """Keep the best-ranked hit per logical drawer, preserving rank order.
+
+    Chunks of one drawer share ``drawer_id`` (``_result_drawer_id`` resolves
+    ``parent_drawer_id``), and each used to take its own top-``limit`` slot, so a
+    top 5 could hold 4 drawers. ``hits`` arrive already hybrid-ranked, so the
+    first occurrence is the best-scoring chunk. Hits without a ``drawer_id`` are
+    kept as they are.
+    """
+    seen = set()
+    out = []
+    for hit in hits:
+        key = hit.get("drawer_id") if isinstance(hit, dict) else None
+        if key:
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(hit)
+    return out
+
+
+def _known_wings() -> set:
+    """Wing names present in the palace (sqlite fast path, else tool_list_wings)."""
+    try:
+        fast = _sqlite_taxonomy()
+        if fast is not None:
+            return set(fast[1])
+        return set((tool_list_wings() or {}).get("wings", {}))
+    except Exception:
+        return set()
+
+
+def _read_wing(raw):
+    """Wing to filter a read by (DR41, fork 2026-09-30).
+
+    The M11 write paths store canonical wings, so a reader asking for
+    ``wing_cowork`` must look in ``cowork``. But drawers written before M11, or by
+    writers outside the MCP (upstream's diary default and hooks_cli still mint
+    ``wing_<name>``), can sit under the raw name, and a filter that only ever
+    looked for the canonical form would make them unreachable. So: the canonical
+    name when the palace holds it, otherwise the name as given. The wing lookup
+    runs only when canonicalisation changes the name.
+    """
+    if not raw:
+        return raw
+    canon = canonical_wing(raw)
+    if canon == raw:
+        return raw
+    return canon if canon in _known_wings() else raw
+
+
 def tool_search(
     query: str,
     limit: int = 5,
@@ -575,7 +651,7 @@ def tool_search(
 ):
     limit = max(1, min(limit, _MAX_RESULTS))
     try:
-        wing = _sanitize_optional_name(wing, "wing")
+        wing = _read_wing(_sanitize_optional_name(wing, "wing"))  # DR41
         room = _sanitize_optional_name(room, "room")
         source_file = _sanitize_optional_source_file(source_file)
     except ValueError as e:
@@ -678,7 +754,7 @@ def tool_search(
     _explicit_bound = min_similarity is not None or max_distance is not None
     _strategy = candidate_strategy if _explicit_bound else "union"
     _dist = dist if _explicit_bound else 0.0
-    _depth = max(int(limit or 5), 100)
+    _depth = _search_depth(limit)  # DR30
     result = search_memories(
         sanitized["clean_query"],
         palace_path=_config.palace_path,
@@ -694,7 +770,7 @@ def tool_search(
         collection_name=_config.collection_name,
     )
     if isinstance(result, dict) and isinstance(result.get("results"), list):
-        result["results"] = result["results"][:limit]
+        result["results"] = _dedupe_by_drawer(result["results"])[:limit]  # DR30
         # Lexical-support signal. Vector distance carries NO relevance
         # information on this corpus -- measured 2026-07-22, correct hits
         # span 0.2343-0.2952 while junk spans 0.2848-0.3777, and a nonsense
@@ -744,7 +820,7 @@ def tool_search(
         _explicit_bound = min_similarity is not None or max_distance is not None
         _strategy = candidate_strategy if _explicit_bound else "union"
         _dist = dist if _explicit_bound else 0.0
-        _depth = max(int(limit or 5), 100)
+        _depth = _search_depth(limit)  # DR30
         result = search_memories(
             sanitized["clean_query"],
             palace_path=_config.palace_path,
@@ -760,7 +836,7 @@ def tool_search(
             collection_name=_config.collection_name,
         )
         if isinstance(result, dict) and isinstance(result.get("results"), list):
-            result["results"] = result["results"][:limit]
+            result["results"] = _dedupe_by_drawer(result["results"])[:limit]  # DR30
             # Lexical-support signal. Vector distance carries NO relevance
             # information on this corpus -- measured 2026-07-22, correct hits
             # span 0.2343-0.2952 while junk spans 0.2848-0.3777, and a nonsense
@@ -883,8 +959,8 @@ def tool_traverse_graph(start_room: str, max_hops: int = 2):
 def tool_find_tunnels(wing_a: str = None, wing_b: str = None):
     """Find rooms that bridge two wings — the hallways connecting domains."""
     try:
-        wing_a = _sanitize_optional_name(wing_a, "wing_a")
-        wing_b = _sanitize_optional_name(wing_b, "wing_b")
+        wing_a = _read_wing(_sanitize_optional_name(wing_a, "wing_a"))  # DR41
+        wing_b = _read_wing(_sanitize_optional_name(wing_b, "wing_b"))  # DR41
     except ValueError as e:
         return {"error": str(e)}
     if _graph_sqlite_reader() is None:
@@ -958,7 +1034,7 @@ def tool_create_tunnel(
 def tool_list_tunnels(wing: str = None):
     """List all explicit cross-wing tunnels, optionally filtered by wing."""
     try:
-        wing = _sanitize_optional_name(wing, "wing")
+        wing = _read_wing(_sanitize_optional_name(wing, "wing"))  # DR41
     except ValueError as e:
         return {"error": str(e)}
     return list_tunnels(wing)
@@ -974,7 +1050,7 @@ def tool_delete_tunnel(tunnel_id: str):
 def tool_list_hallways(wing: str = None):
     """List within-wing hallway records, optionally filtered by wing."""
     try:
-        wing = _sanitize_optional_name(wing, "wing")
+        wing = _read_wing(_sanitize_optional_name(wing, "wing"))  # DR41
     except ValueError as e:
         return {"error": str(e)}
     return list_hallways(wing)
@@ -990,7 +1066,7 @@ def tool_delete_hallway(hallway_id: str):
 def tool_follow_tunnels(wing: str, room: str):
     """Follow explicit tunnels from a room to see connected drawers in other wings."""
     try:
-        wing = sanitize_name(wing, "wing")
+        wing = _read_wing(sanitize_name(wing, "wing"))  # DR41
         room = sanitize_name(room, "room")
     except ValueError as e:
         return {"error": str(e)}

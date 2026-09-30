@@ -1104,7 +1104,7 @@ def tool_list_drawers(
     offset = max(0, offset)
 
     try:
-        wing = _sanitize_optional_name(wing, "wing")
+        wing = _read_wing(_sanitize_optional_name(wing, "wing"))  # DR41
         room = _sanitize_optional_name(room, "room")
         since_dt = _parse_date_filter(since, "since")
         before_dt = _parse_date_filter(before, "before")
