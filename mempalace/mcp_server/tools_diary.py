@@ -44,6 +44,9 @@ def tool_diary_write(
         wing = sanitize_name(wing)
     else:
         wing = f"wing_{agent_name.replace(' ', '_')}"
+    # M11: canonicalise the explicit AND the default wing (the upstream default
+    # wing_<agent> is exactly the malformed shape that minted duplicate wings)
+    wing = canonical_wing(wing)
     room = "diary"
     col = _get_collection(create=True)
     if not col:
@@ -234,7 +237,7 @@ def tool_diary_read(agent_name: str, last_n: int = 10, wing: str = ""):
     try:
         agent_name = sanitize_name(agent_name, "agent_name").lower()
         if wing:
-            wing = sanitize_name(wing)
+            wing = canonical_wing(sanitize_name(wing))  # M11: read where writes land
     except ValueError as e:
         return {"error": str(e)}
     last_n = max(1, min(last_n, 100))

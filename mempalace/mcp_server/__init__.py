@@ -139,6 +139,7 @@ import uuid as _uuid  # noqa: E402
 from ..content_validator import validate_content, quarantine_content, wrap_long_lines  # noqa: E402
 from ..kg_vocabulary import resolve_predicate, resolve_predicate_for_lookup  # noqa: E402
 from ..kg_entities import resolve_entity  # noqa: E402
+from ..wing_aliases import canonical_wing  # noqa: E402  (M11 wing normalisation)
 _MCP_SESSION_ID = _uuid.uuid4().hex[:12]
 
 # ==================== WRITE-AHEAD LOG ====================
