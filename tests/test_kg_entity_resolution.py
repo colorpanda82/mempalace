@@ -384,3 +384,31 @@ class TestTieIsNamedNotClaimedAsMost:
         assert note is not None
         assert "tie" in note.lower()
         assert "most" not in note.lower()
+
+
+
+# -- DE1 (2026-10-02): mixed hyphen/underscore canonical spellings -----------
+
+
+def test_mixed_separator_canonical_is_found():
+    resolved, note = resolve_entity(
+        "design_systems_database", fact_count=_counts({"design-systems_database": 3})
+    )
+    assert resolved == "design-systems_database"
+    assert note
+
+
+def test_mixed_separator_from_hyphenated_input():
+    resolved, _ = resolve_entity(
+        "mempalace-mcp-sidecar", fact_count=_counts({"mempalace-mcp_sidecar": 2})
+    )
+    assert resolved == "mempalace-mcp_sidecar"
+
+
+def test_separator_variants_cap_falls_back_to_extremes():
+    from mempalace.kg_entities import _separator_variants
+
+    name = "a_b_c_d_e_f"  # 5 separator slots, above the cap of 4
+    variants = _separator_variants(name)
+    assert variants == ["a-b-c-d-e-f"]
+    assert "a-b_c_d_e_f" not in variants

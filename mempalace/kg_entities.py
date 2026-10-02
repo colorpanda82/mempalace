@@ -138,6 +138,33 @@ def _hyphenate(name: str) -> str:
     return re.sub(r"[\s_]+", "-", name.strip())
 
 
+_MAX_SEPARATOR_SLOTS = 4  # 2**4 = 16 candidate reads at most; beyond that only the two extremes
+
+
+def _separator_variants(name: str):
+    """All spellings of ``name`` with each separator run swapped between ``_``
+    and ``-`` (space runs count as separators), so a MIXED canonical such as
+    ``design-systems_database`` is reachable from ``design_systems_database``
+    (BACKLOG DE1, 2026-10-02). Order: all-underscore, all-hyphen, then the
+    mixed forms. Capped at ``_MAX_SEPARATOR_SLOTS`` separator runs; above the
+    cap only the two extremes are returned, as before."""
+    parts = re.split(r"[\s_-]+", name.strip())
+    parts = [p for p in parts if p != ""]
+    out = []
+    for cand in (_dehyphenate(name), _hyphenate(name)):
+        if cand and cand != name and cand not in out:
+            out.append(cand)
+    slots = len(parts) - 1
+    if slots < 1 or slots > _MAX_SEPARATOR_SLOTS:
+        return out
+    for mask in range(2 ** slots):
+        seps = ["-" if (mask >> i) & 1 else "_" for i in range(slots)]
+        cand = parts[0] + "".join(s + p for s, p in zip(seps, parts[1:]))
+        if cand != name and cand not in out:
+            out.append(cand)
+    return out
+
+
 def _flagged(a: str, b: str) -> bool:
     pair = frozenset({_normkey(a), _normkey(b)})
     return pair in FLAGGED_NOT_MERGED_PAIRS
@@ -206,10 +233,7 @@ def resolve_entity(name: str, *, fact_count=None, prefer_literal_if_present: boo
     except Exception:
         return original, None
 
-    candidates = []
-    for cand in (_dehyphenate(original), _hyphenate(original)):
-        if cand and cand != original and cand not in candidates:
-            candidates.append(cand)
+    candidates = _separator_variants(original)
 
     scored = []
     for cand in candidates:
