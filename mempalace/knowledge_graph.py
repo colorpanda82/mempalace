@@ -186,9 +186,6 @@ class KnowledgeGraph:
             CREATE INDEX IF NOT EXISTS idx_triples_object ON triples(object);
             CREATE INDEX IF NOT EXISTS idx_triples_predicate ON triples(predicate);
             CREATE INDEX IF NOT EXISTS idx_triples_valid ON triples(valid_from, valid_to);
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_triples_active_unique
-              ON triples(subject, predicate, object)
-              WHERE valid_to IS NULL;
 
             CREATE TABLE IF NOT EXISTS documents (
                 drawer_id         TEXT PRIMARY KEY,
@@ -224,6 +221,21 @@ class KnowledgeGraph:
             conn.execute("ALTER TABLE triples ADD COLUMN source_drawer_id TEXT")
         if "adapter_name" not in existing:
             conn.execute("ALTER TABLE triples ADD COLUMN adapter_name TEXT")
+        # G1b: atomic dedup of identical active triples. The v1 index keyed
+        # only (subject, predicate, object), which forbids what rewrite()
+        # deliberately writes: a successor open alongside a scheduled future
+        # row or another witness's row for the same fact. v2 keys the start
+        # and provenance too, so it still absorbs a racing duplicate add while
+        # admitting those distinct facts. v2 is looser than v1, so any palace
+        # that satisfied v1 builds v2 cleanly.
+        conn.execute("DROP INDEX IF EXISTS idx_triples_active_unique")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_triples_active_unique_v2 ON triples("
+            "subject, predicate, object, COALESCE(valid_from, ''), "
+            "COALESCE(source_closet, ''), COALESCE(source_file, ''), "
+            "COALESCE(source_drawer_id, ''), COALESCE(adapter_name, '')"
+            ") WHERE valid_to IS NULL"
+        )
 
     def _migrate_schema_documents(self, conn):
         """Add documents table to existing instances (F8 forward migration)."""
@@ -448,7 +460,7 @@ class KnowledgeGraph:
                 triple_id = make_triple_id(
                     sub_id, pred, obj_id, valid_from, datetime.now().isoformat()
                 )
-                conn.execute(
+                cur = conn.execute(
                     """INSERT OR IGNORE INTO triples (
                         id, subject, predicate, object, valid_from, valid_to,
                         confidence, source_closet, source_file,
@@ -468,6 +480,16 @@ class KnowledgeGraph:
                         adapter_name,
                     ),
                 )
+                if cur.rowcount == 0:
+                    # A concurrent writer won the active slot after the SELECT
+                    # above; return its row, not an id that was never stored.
+                    row = conn.execute(
+                        "SELECT id FROM triples WHERE subject=? AND predicate=? "
+                        "AND object=? AND valid_to IS NULL",
+                        (sub_id, pred, obj_id),
+                    ).fetchone()
+                    if row:
+                        return row["id"]
                 return triple_id
 
     def invalidate(self, subject: str, predicate: str, obj: str, ended: str = None):
