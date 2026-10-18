@@ -287,7 +287,7 @@ def tool_diary_read(agent_name: str, last_n: int = 10, wing: str = ""):
     try:
         agent_name = sanitize_name(agent_name, "agent_name").lower()
         if wing:
-            wing = canonical_wing(sanitize_name(wing))  # M11: read where writes land
+            wing = _read_wing(sanitize_name(wing))  # DR41: canonical if held, else as given
     except ValueError as e:
         return {"error": str(e)}
     last_n = max(1, min(last_n, 100))
