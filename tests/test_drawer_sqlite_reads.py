@@ -496,3 +496,66 @@ def test_drawer_sqlite_fresh_chunk_mutations_preserve_physical_vs_logical_scope(
             chunk_ids=[original_ids[0], original_ids[2]],
         )
     assert server.tool_get_drawer(target) == {"error": f"Drawer not found: {target}"}
+
+
+@pytest.mark.parametrize("physical", [False, True])
+def test_drawer_sqlite_fresh_chunk_mutations_with_production_tail_merge(
+    drawer_palace, monkeypatch, config, physical
+):
+    """As above, with the fork's runt-tail merge on (min_chunk_size default 50):
+    the 11-char tail joins the second chunk, so the drawer has two rows."""
+    from mempalace.backends.chroma import sqlite_drawer_rows
+
+    server, collection = drawer_palace
+    monkeypatch.setattr(server, "datetime", _Clock)
+    monkeypatch.setattr(_Clock, "at", datetime(2026, 10, 2, 12, 0, 0))
+    monkeypatch.setitem(config._file_config, "chunk_size", 80)
+    assert config.min_chunk_size == 50
+    tail = "日本語 🧠 end"
+    content = "A" * 80 + "B" * 80 + tail
+    added = server.tool_add_drawer("wing_alpha", "notes", content, added_by="test-writer")
+    assert added["success"] is True
+    assert added["chunks"] == 2
+    logical_id = added["drawer_id"]
+    original_ids = added["chunk_ids"]
+    metadata = _written_metadata(server, parent_drawer_id=logical_id)
+    assert _fresh_get(monkeypatch, server, collection, logical_id) == _payload(
+        logical_id, content, metadata, chunk_ids=original_ids
+    )
+    assert _fresh_get(monkeypatch, server, collection, original_ids[1])["content"] == (
+        "B" * 80 + tail
+    )
+
+    target = original_ids[1] if physical else logical_id
+    # logical: 100 chars slice to 80 + a 20-char runt, which merges back to one row
+    replacement = "Edited physical chunk" if physical else "X" * 100
+    monkeypatch.setattr(_Clock, "at", datetime(2026, 10, 2, 13, 0, 0))
+    with _without_sdk_drawer_get(monkeypatch, collection):
+        updated = server.tool_update_drawer(target, content=replacement)
+    assert updated["success"] is True
+    if physical:
+        changed_meta = _written_metadata(
+            server, parent_drawer_id=logical_id, chunk_index=1, last_modified="2026-10-02T13:00:00"
+        )
+        assert _fresh_get(monkeypatch, server, collection, target) == _payload(
+            target, replacement, changed_meta
+        )
+        assert _fresh_get(monkeypatch, server, collection, logical_id) == _payload(
+            logical_id, "A" * 80 + replacement, metadata, chunk_ids=original_ids
+        )
+    else:
+        assert updated["chunks"] == 1
+        got = _fresh_get(monkeypatch, server, collection, target)
+        assert got["content"] == replacement
+
+    with _without_sdk_drawer_get(monkeypatch, collection):
+        deleted = server.tool_delete_drawer(target)
+    assert deleted["success"] is True
+    assert deleted["chunks_deleted"] == 1
+    assert sqlite_drawer_rows(config.palace_path, config.collection_name, drawer_id=target) is None
+    if physical:
+        assert deleted["deleted_ids"] == [target]
+        assert _fresh_get(monkeypatch, server, collection, logical_id) == _payload(
+            logical_id, "A" * 80, metadata, chunk_ids=[original_ids[0]]
+        )
+    assert server.tool_get_drawer(target) == {"error": f"Drawer not found: {target}"}

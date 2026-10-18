@@ -278,6 +278,12 @@ def test_native_media_explicit_vectors_still_work(monkeypatch, collection):
         {"media_type": "image", "title": "Changed"}
     ]
     assert result["embeddings"].tolist() == [[0.0, 1.0]]
+    # I4 stamps dim from the caller's vector, but the embedder name is the
+    # configured text embedder's, even though no embedder produced this vector.
+    (stamp,) = result["metadatas"]
+    assert stamp["dim"] == 2
+    assert stamp["embedder"] == cb._current_embedder_provenance()[0]
+    assert stamp["indexed_at"]
 
 
 def test_list_reserved_metadata_policy_is_case_sensitive(collection, tmp_path):
