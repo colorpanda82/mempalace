@@ -1072,7 +1072,9 @@ def test_chroma_get_all_metadata_reads_sqlite_in_one_pass(tmp_path, monkeypatch)
 
     monkeypatch.setattr(col._collection, "get", _no_chroma_get)
     assert col.get_all_metadata() == expected
-    assert expected[-1] is None  # the "bare" drawer
+    # the "bare" drawer: fork I4 stamps provenance on every write, so it holds
+    # only {embedder, dim, indexed_at} where upstream stores no metadata
+    assert set(expected[-1]) == {"embedder", "dim", "indexed_at"}
 
 
 def test_chroma_iter_metadata_projects_keys_and_requires_a_key(tmp_path):
@@ -1090,7 +1092,8 @@ def test_chroma_iter_metadata_projects_keys_and_requires_a_key(tmp_path):
 
 def test_chroma_iter_metadata_equals_scopes_the_scan(tmp_path):
     col = _recent_palace(tmp_path)
-    everything = [m for m in col.get_all_metadata() if m]
+    # fork I4: the bare drawer carries provenance keys only, no wing
+    everything = [m for m in col.get_all_metadata() if m and "wing" in m]
     rare = list(col.iter_metadata(["wing", "room"], equals={"wing": "rare"}))
     assert rare == [
         {"wing": m["wing"], "room": m["room"]} for m in everything if m["wing"] == "rare"

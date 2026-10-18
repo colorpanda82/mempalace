@@ -69,7 +69,10 @@ def test_backend_update_merges_partial_metadata(tmp_path, backend_name):
             embeddings=[[1.0, 0.0]],
         )
         drawers.update(ids=["d1"], metadatas=[{"wing": "portal", "last_modified": "now"}])
-        assert _by_id(drawers)["d1"] == {**_RICH, "wing": "portal", "last_modified": "now"}
+        got = _by_id(drawers)["d1"]
+        # fork I4: the chroma add stamps {embedder, dim, indexed_at}; compare the rest
+        got = {k: v for k, v in got.items() if k not in ("embedder", "dim", "indexed_at")}
+        assert got == {**_RICH, "wing": "portal", "last_modified": "now"}
     finally:
         backend.close()
 

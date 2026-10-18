@@ -7,6 +7,16 @@ from mempalace.backends.chroma import ChromaCollection
 from test_embedding_wrapper import _FakeInner, _use_metadata_aware_embedder
 
 
+# fork I4: ChromaCollection.add/upsert stamps {embedder, dim, indexed_at} on every
+# write for the drift reconciler. The embedder runs before the stamp and never
+# sees those keys; compare everything else.
+_PROVENANCE_KEYS = ("embedder", "dim", "indexed_at")
+
+
+def _unstamped(meta):
+    return {k: v for k, v in meta.items() if k not in _PROVENANCE_KEYS}
+
+
 @pytest.mark.parametrize("metadata", [None, [{"room": "new"}]])
 def test_chroma_partial_upsert_embeds_retained_metadata(monkeypatch, collection, metadata):
     collection.add(
@@ -23,7 +33,7 @@ def test_chroma_partial_upsert_embeds_retained_metadata(monkeypatch, collection,
     wrapper = ew.EmbeddingCollection(ChromaCollection(collection))
     wrapper.upsert(ids=["old"], documents=["after"], metadatas=metadata)
     saved = collection.get(ids=["old"], include=["metadatas"])["metadatas"]
-    assert ef.calls[-1][1] == saved
+    assert ef.calls[-1][1] == [_unstamped(m) for m in saved]
     assert saved[0]["title"] == "Retained title"
 
 
