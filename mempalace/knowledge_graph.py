@@ -732,6 +732,31 @@ class KnowledgeGraph:
                 ).fetchone()
                 if existing:
                     return existing["id"]
+                # idx_triples_active_unique_v2 ignores confidence and folds NULL
+                # provenance into '', so a row on exactly that key (two aliases
+                # folding to one predicate at one boundary) is the same fact to
+                # the index: return it instead of raising IntegrityError.
+                clash = conn.execute(
+                    "SELECT id FROM triples "
+                    "WHERE subject=? AND predicate=? AND object=? AND valid_to IS NULL "
+                    "AND COALESCE(valid_from, '')=? "
+                    "AND COALESCE(source_closet, '')=COALESCE(?, '') "
+                    "AND COALESCE(source_file, '')=COALESCE(?, '') "
+                    "AND COALESCE(source_drawer_id, '')=COALESCE(?, '') "
+                    "AND COALESCE(adapter_name, '')=COALESCE(?, '')",
+                    (
+                        sub_id,
+                        pred,
+                        obj_id,
+                        boundary,
+                        row["source_closet"],
+                        row["source_file"] or source_file,
+                        row["source_drawer_id"],
+                        row["adapter_name"],
+                    ),
+                ).fetchone()
+                if clash:
+                    return clash["id"]
                 new_id = make_triple_id(sub_id, pred, obj_id, boundary, datetime.now().isoformat())
                 conn.execute(
                     """INSERT INTO triples (
