@@ -199,6 +199,12 @@ def test_diary_sqlite_empty_match_returns_message_without_collection_open(
 def test_diary_sqlite_chunked_entries_remain_physical_rows(diary_palace, monkeypatch, config):
     server, collection = diary_palace
     monkeypatch.setitem(config._file_config, "chunk_size", 80)
+    # fork: _chunk_spans merges a tail under min_chunk_size into the previous
+    # chunk; disable that so the 10-char tail stays its own physical row.
+    monkeypatch.setitem(config._file_config, "min_chunk_size", 0)
+    # fork I6: the content validator quarantines a 250-char run of base64-alphabet
+    # characters as a potential exfil payload; this test is about chunked rows.
+    monkeypatch.setattr(server, "validate_content", lambda *a, **kw: (True, "ok"))
     written = server.tool_diary_write("TestAgent", "0123456789" * 25, topic="chunked")
     assert written["success"] is True
     assert written["chunks"] == 4

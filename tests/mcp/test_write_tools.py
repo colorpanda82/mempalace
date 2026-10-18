@@ -1022,7 +1022,8 @@ class TestWriteTools:
 
         result = tool_update_drawer(drawer_id, wing="StableWing", room="stable_room")
         assert result["success"] is True
-        assert result["wing"] == "StableWing"
+        # fork M11: write paths canonicalise the wing (StableWing -> stablewing)
+        assert result["wing"] == "stablewing"
         assert result["room"] == "stable_room"
 
     def test_update_drawer_content_purges_matching_closets(
