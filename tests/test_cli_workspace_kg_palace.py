@@ -6,6 +6,7 @@ raises it only through ``_apply_server_flags()``, and the port's in-process
 route read the per-user ``DEFAULT_KG_PATH`` instead (no active facts against a
 snapshot palace that had them).
 """
+
 import argparse
 import io
 import json

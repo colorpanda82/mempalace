@@ -53,11 +53,15 @@ def test_legacy_v1_index_is_replaced_on_open(tmp_path):
 
 
 def _open_rows(kg, predicate):
-    return kg._conn().execute(
-        "SELECT id, confidence, source_closet FROM triples "
-        "WHERE predicate=? AND valid_to IS NULL",
-        (predicate,),
-    ).fetchall()
+    return (
+        kg._conn()
+        .execute(
+            "SELECT id, confidence, source_closet FROM triples "
+            "WHERE predicate=? AND valid_to IS NULL",
+            (predicate,),
+        )
+        .fetchall()
+    )
 
 
 def test_rewrite_aliases_with_different_confidence_share_one_successor(tmp_path):
@@ -104,9 +108,7 @@ def test_add_triple_holds_the_write_lock_before_its_duplicate_check(tmp_path):
             conn.rollback()
 
 
-def test_add_triple_id_collision_raises_instead_of_returning_an_unstored_id(
-    tmp_path, monkeypatch
-):
+def test_add_triple_id_collision_raises_instead_of_returning_an_unstored_id(tmp_path, monkeypatch):
     import mempalace.knowledge_graph as kg_mod
 
     monkeypatch.setattr(kg_mod, "make_triple_id", lambda *a, **k: "fixed")
