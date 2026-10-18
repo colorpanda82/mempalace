@@ -460,8 +460,15 @@ class KnowledgeGraph:
                 triple_id = make_triple_id(
                     sub_id, pred, obj_id, valid_from, datetime.now().isoformat()
                 )
-                cur = conn.execute(
-                    """INSERT OR IGNORE INTO triples (
+                # No concurrent writer can win the active slot after the SELECT
+                # above: the entity INSERT OR IGNORE opened the write transaction,
+                # so the SELECT saw the latest snapshot under the write lock, and
+                # any row on idx_triples_active_unique_v2's key would have matched
+                # it. A plain INSERT therefore only fails on a broken invariant
+                # (e.g. an id collision), and it fails loudly instead of returning
+                # an id that was never stored.
+                conn.execute(
+                    """INSERT INTO triples (
                         id, subject, predicate, object, valid_from, valid_to,
                         confidence, source_closet, source_file,
                         source_drawer_id, adapter_name
@@ -480,16 +487,6 @@ class KnowledgeGraph:
                         adapter_name,
                     ),
                 )
-                if cur.rowcount == 0:
-                    # A concurrent writer won the active slot after the SELECT
-                    # above; return its row, not an id that was never stored.
-                    row = conn.execute(
-                        "SELECT id FROM triples WHERE subject=? AND predicate=? "
-                        "AND object=? AND valid_to IS NULL",
-                        (sub_id, pred, obj_id),
-                    ).fetchone()
-                    if row:
-                        return row["id"]
                 return triple_id
 
     def invalidate(self, subject: str, predicate: str, obj: str, ended: str = None):

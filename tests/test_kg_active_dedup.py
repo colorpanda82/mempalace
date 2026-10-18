@@ -2,6 +2,8 @@
 
 import sqlite3
 
+import pytest
+
 from mempalace.knowledge_graph import KnowledgeGraph
 
 
@@ -81,3 +83,35 @@ def test_rewrite_aliases_with_null_and_empty_closet_share_one_successor(tmp_path
         assert first == second
         assert len(_open_rows(kg, "works_for")) == 1
         assert _open_rows(kg, "employed_by") == []
+
+
+def test_add_triple_holds_the_write_lock_before_its_duplicate_check(tmp_path):
+    """Why add_triple needs no rowcount==0 fallback: the entity INSERT OR IGNORE
+    takes the write lock even as a no-op, so no writer can slip in between the
+    duplicate SELECT and the triple INSERT."""
+    db = str(tmp_path / "kg.sqlite3")
+    with KnowledgeGraph(db_path=db) as kg:
+        kg.add_triple("Alice", "likes", "tea")
+        conn = kg._conn()
+        conn.execute("INSERT OR IGNORE INTO entities (id, name) VALUES ('alice', 'Alice')")
+        assert conn.in_transaction
+        other = sqlite3.connect(db, timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                other.execute("INSERT INTO entities (id, name) VALUES ('bob', 'Bob')")
+        finally:
+            other.close()
+            conn.rollback()
+
+
+def test_add_triple_id_collision_raises_instead_of_returning_an_unstored_id(
+    tmp_path, monkeypatch
+):
+    import mempalace.knowledge_graph as kg_mod
+
+    monkeypatch.setattr(kg_mod, "make_triple_id", lambda *a, **k: "fixed")
+    with KnowledgeGraph(db_path=str(tmp_path / "kg.sqlite3")) as kg:
+        assert kg.add_triple("Alice", "likes", "tea", valid_to="2020-01-01") == "fixed"
+        with pytest.raises(sqlite3.IntegrityError):
+            kg.add_triple("Alice", "likes", "coffee")
+        assert kg.query_entity("Alice")[0]["object"] == "tea"
