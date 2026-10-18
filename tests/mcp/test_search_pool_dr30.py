@@ -53,13 +53,34 @@ def test_tool_search_depth_scales_with_limit(mcp, monkeypatch, limit, depth):
     assert cap.calls[0]["n_results"] == depth
 
 
-@pytest.mark.parametrize("kwargs", [{"include_media": True}, {"query_task": "code"}])
-def test_media_and_code_search_get_the_limit_not_the_fusion_depth(mcp, monkeypatch, kwargs):
-    # the v3.11 media/code path ranks by vector alone and accepts n_results 1..100
+_MEDIA_KWARGS = [{"include_media": True}, {"query_task": "code"}]
+
+
+@pytest.mark.parametrize("kwargs", _MEDIA_KWARGS)
+@pytest.mark.parametrize("limit", [5, 30, 100])
+def test_media_and_code_search_depth_is_capped_at_100(mcp, monkeypatch, kwargs, limit):
+    # the v3.11 media/code path accepts n_results 1..100: keep the DR30 pool up to it
     cap = _Capture([_hit("d1", "alpha")])
     monkeypatch.setattr(mcp_server, "search_memories", cap)
-    mcp.tool_search(query="alpha", limit=100, **kwargs)
+    mcp.tool_search(query="alpha", limit=limit, **kwargs)
     assert cap.calls[0]["n_results"] == 100
+
+
+class _ChunkedCapture(_Capture):
+    """Honours n_results like the media path: two chunks per drawer, best first."""
+
+    def __call__(self, query, **kw):
+        self.calls.append(kw)
+        hits = [_hit(f"d{i // 2}", f"alpha {i}") for i in range(200)][: kw["n_results"]]
+        return {"query": query, "filters": {}, "results": hits}
+
+
+@pytest.mark.parametrize("kwargs", _MEDIA_KWARGS)
+def test_media_search_collapse_still_fills_the_limit(mcp, monkeypatch, kwargs):
+    monkeypatch.setattr(mcp_server, "search_memories", _ChunkedCapture())
+    out = mcp.tool_search(query="alpha", limit=30, **kwargs)
+    ids = [h["drawer_id"] for h in out["results"]]
+    assert len(ids) == 30 and len(set(ids)) == 30
 
 
 def test_depth_never_below_limit(mcp, monkeypatch):

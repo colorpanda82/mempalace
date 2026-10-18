@@ -606,13 +606,26 @@ _SEARCH_DEPTH_PER_RESULT = 4
 _SEARCH_DEPTH_CAP = 400
 
 
-def _search_depth(limit) -> int:
-    """Fusion depth handed to search_memories as ``n_results`` (pool = 3x this)."""
+# The v3.11 media/code path (include_media / query_task) rejects n_results
+# above 100, so its depth is capped there rather than at _SEARCH_DEPTH_CAP.
+_MEDIA_SEARCH_DEPTH_CAP = 100
+
+
+def _search_depth(limit, experimental=None) -> int:
+    """Fusion depth handed to search_memories as ``n_results`` (pool = 3x this).
+
+    ``experimental`` holds the media/code kwargs; when set, the depth is capped
+    at what that path accepts, so it still retrieves past ``limit`` and the
+    one-hit-per-drawer collapse can fill ``limit`` slots.
+    """
     try:
         n = int(limit or 5)
     except (TypeError, ValueError):
         n = 5
-    return min(max(n * _SEARCH_DEPTH_PER_RESULT, _SEARCH_DEPTH_FLOOR), _SEARCH_DEPTH_CAP)
+    depth = min(max(n * _SEARCH_DEPTH_PER_RESULT, _SEARCH_DEPTH_FLOOR), _SEARCH_DEPTH_CAP)
+    if experimental:
+        depth = min(depth, _MEDIA_SEARCH_DEPTH_CAP)
+    return depth
 
 
 def _dedupe_by_drawer(hits):
@@ -803,9 +816,7 @@ def tool_search(
     _explicit_bound = min_similarity is not None or max_distance is not None
     _strategy = candidate_strategy if _explicit_bound else "union"
     _dist = dist if _explicit_bound else 0.0
-    # DR30 depth feeds hybrid fusion only. The media/code path ranks by vector
-    # alone, sizes its own pool and accepts n_results in 1..100.
-    _depth = limit if experimental else _search_depth(limit)  # DR30
+    _depth = _search_depth(limit, experimental)  # DR30
     result = search_memories(
         sanitized["clean_query"],
         palace_path=_config.palace_path,
@@ -872,7 +883,7 @@ def tool_search(
         _explicit_bound = min_similarity is not None or max_distance is not None
         _strategy = candidate_strategy if _explicit_bound else "union"
         _dist = dist if _explicit_bound else 0.0
-        _depth = limit if experimental else _search_depth(limit)  # DR30
+        _depth = _search_depth(limit, experimental)  # DR30
         result = search_memories(
             sanitized["clean_query"],
             palace_path=_config.palace_path,
