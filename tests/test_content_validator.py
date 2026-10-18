@@ -1,6 +1,5 @@
 """Unit tests for the I6 content validator (lenient/quarantine policy)."""
-import os, sys
-sys.path.insert(0, "/Volumes/Jarvis Working/repos/mempalace-eg384")
+
 from mempalace.content_validator import validate_content
 
 
