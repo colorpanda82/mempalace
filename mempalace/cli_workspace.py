@@ -182,6 +182,9 @@ def call_tool(name, args=None, *, palace_path=None):
     Returns the tool's result dict. Never raises for tool-level errors.
     """
     args = dict(args or {})
+    # A palace named by the caller (``--palace`` on the CLI) is explicit, the
+    # way the MCP server's own --palace is: its knowledge graph lives inside it.
+    explicit_palace = bool(palace_path)
     if palace_path:
         palace_path = os.path.abspath(os.path.expanduser(palace_path))
     else:
@@ -216,6 +219,11 @@ def call_tool(name, args=None, *, palace_path=None):
     # MEMPALACE_PALACE_PATH at FIRST import, so the env must be set before it.
     os.environ["MEMPALACE_PALACE_PATH"] = palace_path
     from mempalace import mcp_server
+    if explicit_palace:
+        # 3.10 raised _palace_flag_given at import from sys.argv; 3.11 raises it
+        # only through _apply_server_flags(), so without this an explicit palace
+        # read and wrote the per-user DEFAULT_KG_PATH instead of its own graph.
+        mcp_server._apply_server_flags(palace=palace_path)
     fn = getattr(mcp_server, f"tool_{name}")
     return _run_maybe_async(fn(**args))
 
@@ -224,7 +232,9 @@ def _invoke(args, fn_name, **kwargs):
     """Bind the palace and call one tool (hub-first) with stdout isolated to
     stderr so only our JSON reaches stdout."""
     with _stdout_to_stderr():
-        return call_tool(fn_name[len("tool_"):], kwargs, palace_path=_resolve_palace(args))
+        # Only a given --palace is passed on; call_tool resolves the default
+        # itself and must not mistake it for an explicit palace.
+        return call_tool(fn_name[len("tool_"):], kwargs, palace_path=getattr(args, "palace", None))
 
 
 # --------------------------------------------------------------------------

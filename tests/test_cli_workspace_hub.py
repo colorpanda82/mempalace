@@ -35,6 +35,9 @@ def _wire(monkeypatch, fake, tmp_path):
     # The in-process route pins MEMPALACE_PALACE_PATH for mcp_server; keep that
     # inside the test so later test modules do not inherit a tmp palace.
     monkeypatch.setenv("MEMPALACE_PALACE_PATH", str(tmp_path))
+    # An explicit palace_path also raises the server's --palace flag.
+    from mempalace import mcp_server
+    monkeypatch.setattr(mcp_server, "_palace_flag_given", mcp_server._palace_flag_given)
     return str(tmp_path)
 
 
