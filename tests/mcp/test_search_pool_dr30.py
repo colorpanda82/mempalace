@@ -157,12 +157,17 @@ def test_list_drawers_and_rooms_find_canonical_wing(mcp):
 def test_tunnel_and_hallway_filters_are_canonical(mcp, monkeypatch):
     monkeypatch.setattr(mcp_server, "_known_wings", lambda: CANON_WINGS)
     seen = {}
-    monkeypatch.setattr(mcp_server, "list_tunnels", lambda w: seen.setdefault("lt", w) or [])
-    monkeypatch.setattr(mcp_server, "list_hallways", lambda w: seen.setdefault("lh", w) or [])
-    monkeypatch.setattr(mcp_server, "find_tunnels",
-                        lambda a, b, **kw: seen.setdefault("ft", (a, b)) or [])
-    monkeypatch.setattr(mcp_server, "follow_tunnels",
-                        lambda w, r, **kw: seen.setdefault("fo", (w, r)) or [])
+
+    def record(key, value):
+        # Record the filter and return an empty result: v3.11 tool_list_hallways
+        # sorts the rows it gets back, so the stub must return a list.
+        seen[key] = value
+        return []
+
+    monkeypatch.setattr(mcp_server, "list_tunnels", lambda w: record("lt", w))
+    monkeypatch.setattr(mcp_server, "list_hallways", lambda w: record("lh", w))
+    monkeypatch.setattr(mcp_server, "find_tunnels", lambda a, b, **kw: record("ft", (a, b)))
+    monkeypatch.setattr(mcp_server, "follow_tunnels", lambda w, r, **kw: record("fo", (w, r)))
     mcp.tool_list_tunnels(wing="wing_cowork")
     mcp.tool_list_hallways(wing="wing_jarvis")
     mcp.tool_find_tunnels(wing_a="wing_bnm", wing_b="Claude_Code")
