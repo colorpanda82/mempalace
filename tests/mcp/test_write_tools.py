@@ -144,9 +144,10 @@ class TestWriteTools:
             content="This is a test memory about Python decorators and metaclasses.",
         )
         assert result["success"] is True
-        assert result["wing"] == "test_wing"
+        assert result["wing"] == "test-wing"  # fork M11: write paths canonicalise the wing
         assert result["room"] == "test_room"
-        assert result["drawer_id"].startswith("drawer_test_wing_test_room_")
+        # fork M11: the drawer id is derived from the canonical wing
+        assert result["drawer_id"].startswith("drawer_test-wing_test_room_")
 
     def test_add_drawer_duplicate_detection(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
@@ -952,7 +953,7 @@ class TestWriteTools:
 
         result = tool_update_drawer("drawer_proj_backend_aaa", wing="new_wing", room="new_room")
         assert result["success"] is True
-        assert result["wing"] == "new_wing"
+        assert result["wing"] == "new-wing"  # fork M11: write paths canonicalise the wing
         assert result["room"] == "new_room"
 
     def test_update_drawer_case_only_wing_rename_applies(
