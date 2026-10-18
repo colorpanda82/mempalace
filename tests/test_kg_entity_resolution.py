@@ -190,7 +190,7 @@ def test_kg_add_resolves_object_too(add_captured):
 
 class TestEntityResolutionEndToEnd:
     def test_merge_target_receives_the_write(self, monkeypatch, config, palace_path, kg):
-        from tests.test_mcp_server import _patch_mcp_server
+        from tests._mcp_server_helpers import _patch_mcp_server
 
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_add
@@ -208,7 +208,7 @@ class TestEntityResolutionEndToEnd:
         assert len(facts_old) == 0
 
     def test_flagged_pair_is_never_conflated_end_to_end(self, monkeypatch, config, palace_path, kg):
-        from tests.test_mcp_server import _patch_mcp_server
+        from tests._mcp_server_helpers import _patch_mcp_server
 
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_add
@@ -220,7 +220,7 @@ class TestEntityResolutionEndToEnd:
         assert len(kg.query_entity("jarvis")) == 1
 
     def test_kg_query_end_to_end_resolves_and_notes(self, monkeypatch, config, palace_path, kg):
-        from tests.test_mcp_server import _patch_mcp_server
+        from tests._mcp_server_helpers import _patch_mcp_server
 
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_add, tool_kg_query
@@ -248,7 +248,7 @@ class TestFuzzyLeakGuard:
     def test_foo_bar_baz_fuzzy_trap_does_not_create_a_phantom_node(
         self, monkeypatch, config, palace_path, kg
     ):
-        from tests.test_mcp_server import _patch_mcp_server
+        from tests._mcp_server_helpers import _patch_mcp_server
 
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_add
@@ -271,7 +271,7 @@ class TestFuzzyLeakGuard:
     def test_date_like_literal_is_not_rewritten_by_a_fuzzy_sibling(
         self, monkeypatch, config, palace_path, kg
     ):
-        from tests.test_mcp_server import _patch_mcp_server
+        from tests._mcp_server_helpers import _patch_mcp_server
 
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_add
@@ -296,7 +296,7 @@ class TestAliasHeldFactsNotRedirected:
     def test_invalidate_operates_on_the_alias_that_actually_holds_the_fact(
         self, monkeypatch, config, palace_path, kg
     ):
-        from tests.test_mcp_server import _patch_mcp_server
+        from tests._mcp_server_helpers import _patch_mcp_server
 
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_invalidate
@@ -319,7 +319,7 @@ class TestAliasHeldFactsNotRedirected:
     def test_supersede_operates_on_the_alias_that_actually_holds_the_fact(
         self, monkeypatch, config, palace_path, kg
     ):
-        from tests.test_mcp_server import _patch_mcp_server
+        from tests._mcp_server_helpers import _patch_mcp_server
 
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_supersede
@@ -351,7 +351,7 @@ class TestDirectionInsensitiveCounting:
     def test_kg_query_resolves_an_entity_with_only_incoming_facts(
         self, monkeypatch, config, palace_path, kg
     ):
-        from tests.test_mcp_server import _patch_mcp_server
+        from tests._mcp_server_helpers import _patch_mcp_server
 
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_query

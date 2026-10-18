@@ -178,7 +178,7 @@ class TestVocabularyEndToEnd:
         self, monkeypatch, config, palace_path, kg
     ):
         """Write an alias, read back the canonical predicate from SQLite."""
-        from tests.test_mcp_server import _patch_mcp_server
+        from tests._mcp_server_helpers import _patch_mcp_server
 
         _patch_mcp_server(monkeypatch, config, kg)
         monkeypatch.delenv("MEMPALACE_PREDICATE_POLICY", raising=False)
@@ -202,7 +202,7 @@ class TestVocabularyEndToEnd:
         self, monkeypatch, config, palace_path, kg
     ):
         """The point of normalizing: one query finds facts written either way."""
-        from tests.test_mcp_server import _patch_mcp_server
+        from tests._mcp_server_helpers import _patch_mcp_server
 
         _patch_mcp_server(monkeypatch, config, kg)
         monkeypatch.delenv("MEMPALACE_PREDICATE_POLICY", raising=False)
@@ -222,7 +222,7 @@ class TestVocabularyEndToEnd:
     def test_banned_predicate_writes_nothing_to_a_real_kg(
         self, monkeypatch, config, palace_path, kg
     ):
-        from tests.test_mcp_server import _patch_mcp_server
+        from tests._mcp_server_helpers import _patch_mcp_server
 
         _patch_mcp_server(monkeypatch, config, kg)
         monkeypatch.delenv("MEMPALACE_PREDICATE_POLICY", raising=False)
@@ -236,7 +236,7 @@ class TestVocabularyEndToEnd:
         self, monkeypatch, config, palace_path, kg
     ):
         """MemPalace's native use case must survive the vocabulary layer."""
-        from tests.test_mcp_server import _patch_mcp_server
+        from tests._mcp_server_helpers import _patch_mcp_server
 
         _patch_mcp_server(monkeypatch, config, kg)
         monkeypatch.delenv("MEMPALACE_PREDICATE_POLICY", raising=False)
@@ -262,7 +262,7 @@ class TestAddInvalidateRoundTrip:
         self, monkeypatch, config, palace_path, kg
     ):
         """The blocker, as a test. add(runs_on) then invalidate(runs_on)."""
-        from tests.test_mcp_server import _patch_mcp_server
+        from tests._mcp_server_helpers import _patch_mcp_server
 
         _patch_mcp_server(monkeypatch, config, kg)
         monkeypatch.delenv("MEMPALACE_PREDICATE_POLICY", raising=False)
@@ -282,7 +282,7 @@ class TestAddInvalidateRoundTrip:
         assert facts[0]["current"] is False, "the fact the caller created must be ended"
 
     def test_canonical_round_trip_still_works(self, monkeypatch, config, palace_path, kg):
-        from tests.test_mcp_server import _patch_mcp_server
+        from tests._mcp_server_helpers import _patch_mcp_server
 
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_add, tool_kg_invalidate
@@ -296,7 +296,7 @@ class TestAddInvalidateRoundTrip:
         self, monkeypatch, config, palace_path, kg
     ):
         """A no-op UPDATE must never be reported as 'ended'."""
-        from tests.test_mcp_server import _patch_mcp_server
+        from tests._mcp_server_helpers import _patch_mcp_server
 
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_invalidate
@@ -310,7 +310,7 @@ class TestAddInvalidateRoundTrip:
     def test_double_invalidate_reports_the_second_as_no_match(
         self, monkeypatch, config, palace_path, kg
     ):
-        from tests.test_mcp_server import _patch_mcp_server
+        from tests._mcp_server_helpers import _patch_mcp_server
 
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_add, tool_kg_invalidate
@@ -327,7 +327,7 @@ class TestAddInvalidateRoundTrip:
         A 'status' triple cannot be CREATED any more, but one written before
         the gate existed must still be removable.
         """
-        from tests.test_mcp_server import _patch_mcp_server
+        from tests._mcp_server_helpers import _patch_mcp_server
 
         _patch_mcp_server(monkeypatch, config, kg)
         from mempalace.mcp_server import tool_kg_add, tool_kg_invalidate
