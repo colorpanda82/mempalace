@@ -803,7 +803,9 @@ def tool_search(
     _explicit_bound = min_similarity is not None or max_distance is not None
     _strategy = candidate_strategy if _explicit_bound else "union"
     _dist = dist if _explicit_bound else 0.0
-    _depth = _search_depth(limit)  # DR30
+    # DR30 depth feeds hybrid fusion only. The media/code path ranks by vector
+    # alone, sizes its own pool and accepts n_results in 1..100.
+    _depth = limit if experimental else _search_depth(limit)  # DR30
     result = search_memories(
         sanitized["clean_query"],
         palace_path=_config.palace_path,
@@ -870,7 +872,7 @@ def tool_search(
         _explicit_bound = min_similarity is not None or max_distance is not None
         _strategy = candidate_strategy if _explicit_bound else "union"
         _dist = dist if _explicit_bound else 0.0
-        _depth = _search_depth(limit)  # DR30
+        _depth = limit if experimental else _search_depth(limit)  # DR30
         result = search_memories(
             sanitized["clean_query"],
             palace_path=_config.palace_path,

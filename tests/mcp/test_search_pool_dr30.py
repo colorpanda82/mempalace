@@ -53,6 +53,15 @@ def test_tool_search_depth_scales_with_limit(mcp, monkeypatch, limit, depth):
     assert cap.calls[0]["n_results"] == depth
 
 
+@pytest.mark.parametrize("kwargs", [{"include_media": True}, {"query_task": "code"}])
+def test_media_and_code_search_get_the_limit_not_the_fusion_depth(mcp, monkeypatch, kwargs):
+    # the v3.11 media/code path ranks by vector alone and accepts n_results 1..100
+    cap = _Capture([_hit("d1", "alpha")])
+    monkeypatch.setattr(mcp_server, "search_memories", cap)
+    mcp.tool_search(query="alpha", limit=100, **kwargs)
+    assert cap.calls[0]["n_results"] == 100
+
+
 def test_depth_never_below_limit(mcp, monkeypatch):
     cap = _Capture()
     monkeypatch.setattr(mcp_server, "search_memories", cap)
