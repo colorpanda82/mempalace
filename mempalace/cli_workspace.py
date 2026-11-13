@@ -128,11 +128,17 @@ def _stdout_to_stderr():
 
 
 def _hub_for(palace_path):
-    """(base_url, headers) of a live hub serving ``palace_path``, else None."""
+    """The live hub serving ``palace_path`` (a ``hub_client.HubClient``), else None.
+
+    3.12 replaced ``hub_client.discover_hub`` / ``forward_json_rpc`` with
+    ``HubClient``; calling the old names raised inside the ``except`` below,
+    so every workspace call silently took the in-process path and a running
+    hub refused its writes.
+    """
     try:
         from mempalace import hub_client
 
-        return hub_client.discover_hub(palace_path)
+        return hub_client.HubClient.discover(palace_path)
     except Exception:  # noqa: BLE001 - discovery is best-effort; direct path remains
         return None
 
@@ -195,9 +201,6 @@ def call_tool(name, args=None, *, palace_path=None):
         palace_path = _default_palace()
     hub = _hub_for(palace_path)
     if hub is not None:
-        from mempalace import hub_client
-
-        base_url, headers = hub
         # The hub validates argument TYPES, so a None that merely means "not
         # given" (every tool_* kwarg defaults to None) is rejected as
         # "Invalid value for parameter" — measured 2026-09-02 on max_distance,
@@ -211,11 +214,11 @@ def call_tool(name, args=None, *, palace_path=None):
             "params": {"name": f"mempalace_{name}", "arguments": hub_args},
         }
         try:
-            response = hub_client.forward_json_rpc(base_url, headers, request)
+            response = hub.post(request)
         except Exception as e:  # noqa: BLE001 - a dead hub must not be silently retried locally
             # A write that reached the hub may still be executing there; never
             # replay it in-process (same rule as mcp_server._dispatch_stdio_request).
-            return {"success": False, "error": f"hub call failed: {e!r}", "hub": base_url}
+            return {"success": False, "error": f"hub call failed: {e!r}", "hub": hub.base_url}
         out = _unwrap_tool_result(response)
         if isinstance(out, dict):
             out.setdefault("via", "hub")
@@ -446,7 +449,7 @@ def _h_ws_selftest(args):
                 "ok": not missing,
                 "present": present,
                 "missing": missing,
-                "hub": hub[0] if hub else None,
+                "hub": hub.base_url if hub else None,
             },
             ensure_ascii=False,
             indent=2,

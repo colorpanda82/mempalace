@@ -14,19 +14,28 @@ from mempalace import cli_workspace
 
 
 class _FakeHubClient:
-    def __init__(self, response, hub=("http://127.0.0.1:8766", {"X": "1"})):
+    """Stands in for the ``mempalace.hub_client`` module (3.12 ``HubClient`` API)."""
+
+    def __init__(self, response, hub="http://127.0.0.1:8766"):
         self.response = response
         self.hub = hub
         self.sent = []
+        fake = self
 
-    def discover_hub(self, palace_path):
-        return self.hub
+        class _Hub:
+            base_url = hub
 
-    def forward_json_rpc(self, base_url, headers, request, **_):
-        self.sent.append((base_url, headers, request))
-        if isinstance(self.response, Exception):
-            raise self.response
-        return self.response
+            @classmethod
+            def discover(cls, palace_path, **_):
+                return cls() if fake.hub else None
+
+            def post(self, request, **_):
+                fake.sent.append((self.base_url, request))
+                if isinstance(fake.response, Exception):
+                    raise fake.response
+                return fake.response
+
+        self.HubClient = _Hub
 
 
 def _wire(monkeypatch, fake, tmp_path):
@@ -62,7 +71,7 @@ def test_forwards_to_hub_with_prefixed_name_and_unwraps_result(monkeypatch, tmp_
 
     assert out["success"] is True and out["drawer_id"] == "d1"
     assert out["via"] == "hub"
-    base_url, headers, request = fake.sent[0]
+    base_url, request = fake.sent[0]
     assert base_url == "http://127.0.0.1:8766"
     assert request["method"] == "tools/call"
     assert request["params"]["name"] == "mempalace_add_drawer"
@@ -81,7 +90,56 @@ def test_none_arguments_are_omitted_on_the_hub_route(monkeypatch, tmp_path):
         palace_path=palace,
     )
 
-    assert fake.sent[0][2]["params"]["arguments"] == {"query": "q", "limit": 5}
+    assert fake.sent[0][1]["params"]["arguments"] == {"query": "q", "limit": 5}
+
+
+def test_forwards_through_the_real_hub_client(monkeypatch, tmp_path):
+    """No fake module: the graft must call the hub_client API this release ships.
+
+    3.12 removed ``discover_hub``/``forward_json_rpc``; the graft kept calling
+    them, the AttributeError was swallowed as "no hub", and every workspace
+    write went in-process, where a running hub refuses it.
+    """
+    import io
+
+    from mempalace import _net, hub_client, server_registry
+
+    monkeypatch.delenv(hub_client.HUB_FORWARD_ENV, raising=False)
+    monkeypatch.setattr(
+        server_registry,
+        "read_live_serverinfo",
+        lambda _palace: {"pid": -1, "host": "127.0.0.1", "port": 8766},
+    )
+    monkeypatch.setattr(server_registry, "load_server_tokens", lambda _palace: ("",))
+    sent = []
+
+    class _Response(io.BytesIO):
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(request, timeout):
+        sent.append(request)
+        return _Response(json.dumps(_tool_response({"success": True, "drawer_id": "d9"})).encode())
+
+    monkeypatch.setattr(_net, "urlopen", fake_urlopen)
+    import mempalace.mcp_server as m
+
+    monkeypatch.setattr(m, "tool_add_drawer", lambda **kw: {"success": False, "in_process": True})
+
+    out = cli_workspace.call_tool(
+        "add_drawer", {"wing": "w", "room": "r", "content": "c"}, palace_path=str(tmp_path)
+    )
+
+    assert out == {"success": True, "drawer_id": "d9", "via": "hub"}
+    assert sent and sent[0].full_url == "http://127.0.0.1:8766/mcp"
+    body = json.loads(sent[0].data)
+    assert body["params"]["name"] == "mempalace_add_drawer"
+    assert cli_workspace._hub_for(str(tmp_path)).base_url == "http://127.0.0.1:8766"
 
 
 def test_hub_json_rpc_error_maps_to_tool_error_shape(monkeypatch, tmp_path):
