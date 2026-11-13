@@ -403,15 +403,35 @@ def traverse(start_room: str, col=None, config=None, max_hops: int = 2):
     return results[:50]  # cap results
 
 
-def find_tunnels(wing_a: str = None, wing_b: str = None, col=None, config=None):
+def _wing_filter(wing) -> set | None:
+    """The stored wing names a ``find_tunnels`` filter matches, or ``None``.
+
+    A name matches its slug, as upstream does. Fork: a list of names (every
+    spelling of one wing, from ``config.wing_aliases``) matches each name and
+    its slug, so a palace still holding ``jarvis-ops`` is found by any of them.
+    """
+    if wing is None or isinstance(wing, str):
+        norm = _normalize_wing(wing)
+        return {norm} if norm else None
+    names = set()
+    for name in wing:
+        norm = _normalize_wing(name)
+        if norm:
+            names.update((name, norm))
+    return names or None
+
+
+def find_tunnels(wing_a=None, wing_b=None, col=None, config=None):
     """
     Find rooms that connect two wings (or all tunnel rooms if no wings specified).
     These are the "hallways" — same named idea appearing in multiple domains.
+
+    ``wing_a`` / ``wing_b`` are a wing name or a list of its spellings.
     """
     nodes, edges = build_graph(col, config)
 
-    norm_a = _normalize_wing(wing_a)
-    norm_b = _normalize_wing(wing_b)
+    norm_a = _wing_filter(wing_a)
+    norm_b = _wing_filter(wing_b)
 
     tunnels = []
     for room, data in nodes.items():
@@ -419,9 +439,9 @@ def find_tunnels(wing_a: str = None, wing_b: str = None, col=None, config=None):
         if len(wings) < 2:
             continue
 
-        if norm_a and norm_a not in wings:
+        if norm_a and norm_a.isdisjoint(wings):
             continue
-        if norm_b and norm_b not in wings:
+        if norm_b and norm_b.isdisjoint(wings):
             continue
 
         tunnels.append(

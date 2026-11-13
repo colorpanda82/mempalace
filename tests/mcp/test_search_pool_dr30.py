@@ -235,5 +235,7 @@ def test_tunnel_and_hallway_filters_are_canonical(mcp, monkeypatch):
     # hallways are keyed by the stored wing: every spelling is matched
     assert seen["lh"][0] == "jarvis_ops"
     assert {"jarvis-ops", "wing_jarvis", "jarvis", "project_jarvis_ops"} <= set(seen["lh"])
-    assert seen["ft"] == ("brave_new_media", "claude_code")
+    # find_tunnels matches stored wings too: every spelling, canonical first
+    assert [names[0] for names in seen["ft"]] == ["brave_new_media", "claude_code"]
+    assert {"bnm", "wing_bnm", "brave-new-media"} <= set(seen["ft"][0])
     assert seen["fo"] == ("cowork", "diary")

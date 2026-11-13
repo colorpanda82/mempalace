@@ -125,3 +125,26 @@ def test_unrelated_wings_are_not_pulled_in():
     assert set(wing_aliases("cowork", known)) & known == {"cowork", "wing_claude"}
     assert set(wing_aliases("brave_new_media", known)) & known == {"bnm"}
     assert set(wing_aliases("bnm_hive", known)) & known == {"bnm_hive", "bnm-hive"}
+
+
+def test_find_tunnels_matches_every_spelling(monkeypatch, config, palace_path, collection, kg):
+    """A room shared by two wings bridges them under any spelling of either."""
+    collection.add(
+        ids=["ft_jarvis", "ft_hive"],
+        documents=["tunnel probe jarvis side", "tunnel probe hive side"],
+        metadatas=[
+            {"wing": "jarvis-ops", "room": "bridge", "source_file": "a.md"},
+            {"wing": "bnm-hive", "room": "bridge", "source_file": "b.md"},
+        ],
+    )
+    _patch_mcp_server(monkeypatch, config, kg)
+    from mempalace import mcp_server
+
+    for asked in ("jarvis-ops", "jarvis_ops", "Jarvis Ops", "wing_jarvis", "jarvis"):
+        found = mcp_server.tool_find_tunnels(wing_a=asked)
+        assert [t["room"] for t in found] == ["bridge"], (asked, found)
+        found = mcp_server.tool_find_tunnels(wing_a=asked, wing_b="bnm_hive")
+        assert [t["room"] for t in found] == ["bridge"], (asked, found)
+    found = mcp_server.tool_find_tunnels(wing_a="bnm-hive", wing_b="jarvis")
+    assert [t["room"] for t in found] == ["bridge"], found
+    assert mcp_server.tool_find_tunnels(wing_a="jarvis_ops", wing_b="cowork") == []

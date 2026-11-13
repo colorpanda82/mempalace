@@ -1034,6 +1034,9 @@ def tool_find_tunnels(wing_a: str = None, wing_b: str = None):
         wing_b = _read_wing(_sanitize_optional_name(wing_b, "wing_b"))  # DR41
     except ValueError as e:
         return {"error": str(e)}
+    # Fork: the graph holds stored wings, so match every spelling of each.
+    wing_a = _palace_wing_aliases(wing_a) if wing_a else wing_a
+    wing_b = _palace_wing_aliases(wing_b) if wing_b else wing_b
     if _graph_sqlite_reader() is None:
         col = _get_collection()
         if not col:
