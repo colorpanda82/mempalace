@@ -310,8 +310,7 @@ class TestDiaryTools:
         )
         assert written["success"] is True
         stored = col.get(ids=[written["entry_id"]], include=["metadatas"])
-        # fork M11: the stored form is hyphenated (upstream #2845 slugs to my_app)
-        assert stored["metadatas"][0]["wing"] == "my-app"
+        assert stored["metadatas"][0]["wing"] == "my_app"
 
         bad = tool_diary_write(
             agent_name="TestAgent",

@@ -131,6 +131,13 @@ def wing_aliases(wing: str, known=()) -> list:
             stored = normalize_wing_name(name)
             if stored.removeprefix("wing_") == slug:
                 names.append(name)
+    # Fork (M11): the alias table and its legacy spellings (wing_claude ->
+    # cowork, bnm -> brave_new_media) read through the canonical wing too.
+    from .wing_aliases import read_names
+
+    for name in read_names(wing, known):
+        if name not in names:
+            names.append(name)
     return names
 
 

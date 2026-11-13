@@ -723,26 +723,24 @@ def _known_wings() -> set:
 
 
 def _read_wing(raw):
-    """Wing to filter a read by (DR41, fork 2026-09-30).
+    """Wing to filter a read by (DR41, fork).
 
-    The M11 write paths store canonical wings, so a reader asking for
-    ``wing_cowork`` must look in ``cowork``. But drawers written before M11, or by
-    writers outside the MCP (upstream's diary default and hooks_cli still mint
-    ``wing_<name>``), can sit under the raw name, and a filter that only ever
-    looked for the canonical form would make them unreachable. So: the canonical
-    name when the palace holds it, otherwise the name as given. The wing lookup
-    runs only when canonicalisation changes the name.
+    The canonical wing (``wing_cowork`` -> ``cowork``, ``jarvis-ops`` ->
+    ``jarvis_ops``). It does not narrow the read to one stored form: every
+    drawer filter expands it through ``config.wing_aliases``, which matches the
+    hyphen, underscore and ``wing_`` spellings and, through
+    ``wing_aliases.read_names``, every stored wing that canonicalises to it
+    (``wing_claude``, ``bnm``). So drawers filed before a wing was migrated
+    stay readable under the canonical name and under the name they were
+    filed with.
     """
     if not raw:
         return raw
     try:
-        canon = canonical_wing(raw)
+        return canonical_wing(raw)
     except ValueError:
-        # 3.12's slug can empty a name sanitize_name accepted; read it as given.
+        # Upstream's slug can empty a name sanitize_name accepted; read it as given.
         return raw
-    if canon == raw:
-        return raw
-    return canon if canon in _known_wings() else raw
 
 
 def tool_search(
@@ -1135,7 +1133,9 @@ def tool_list_hallways(wing: str = None, limit: int = 100, offset: int = 0):
         wing = _read_wing(_sanitize_optional_name(wing, "wing"))  # DR41
     except ValueError as e:
         return {"error": str(e)}
-    page, total = list_hallways_page(wing, limit=limit, offset=offset)
+    # Fork: hallways are keyed by the stored wing, so match every spelling.
+    wings = _palace_wing_aliases(wing) if wing else None
+    page, total = list_hallways_page(wings, limit=limit, offset=offset)
     return {
         "hallways": page,
         "total": total,

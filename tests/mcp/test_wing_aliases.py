@@ -93,8 +93,8 @@ def test_diary_read_finds_entries_under_the_old_project_and_agent_wings(
 
     # An agent's default wing slugs like a project; the hyphenated old wing still reads.
     written = mcp_server.tool_diary_write("cursor-ide", "new agent note")
-    # fork M11: the agent default is canonicalised too (wing_cursor_ide -> cursor-ide)
-    assert written["success"] and written["entry_id"].startswith("diary_cursor-ide_"), written
+    # fork M11: the agent default's wing_ prefix is stripped (wing_cursor_ide -> cursor_ide)
+    assert written["success"] and written["entry_id"].startswith("diary_cursor_ide_"), written
     agent = mcp_server.tool_diary_read("cursor-ide", last_n=10, wing="wing_cursor_ide")
     assert {e["content"] for e in agent["entries"]} == {"old agent note", "new agent note"}
 

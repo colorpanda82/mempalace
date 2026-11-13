@@ -183,14 +183,13 @@ from ..wing_aliases import canonical_wing as _fork_canonical_wing  # noqa: E402
 
 
 def canonical_wing(value: str, field_name: str = "wing") -> str:
-    """The wing the MCP write and read paths use (M11, fork; rebased onto 3.12).
+    """The wing the MCP write and read paths use (M11, fork).
 
-    3.12's ``config.canonical_wing`` (#2845) validates and slugs to the
-    underscore form (``jarvis-ops`` -> ``jarvis_ops``) and keeps a ``wing_``
-    prefix. The fork's stored form is hyphenated with no prefix and runs the
-    alias table, so the fork rule runs AFTER upstream's validation and slug:
-    upstream still rejects bad input and folds spaces and stray characters, and
-    ``wing_aliases.canonical_wing`` then decides what is stored. This name
+    Upstream's ``config.canonical_wing`` validates and slugs to the underscore
+    form (``jarvis-ops`` -> ``jarvis_ops``), the form every miner and hook
+    stores. The fork rule then runs on that slug: it strips a leading
+    ``wing_`` prefix and applies the alias table (``wing_bnm`` ->
+    ``brave_new_media``), whose targets are underscore slugs too. This name
     shadows the upstream import above for every exec'd fragment.
     """
     slug = _upstream_canonical_wing(value, field_name)

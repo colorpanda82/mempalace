@@ -63,8 +63,7 @@ class TestWriteTools:
         assert result["success"] is True
         stored = col.get(ids=[result["drawer_id"]], include=["metadatas"])
         assert stored["metadatas"], stored
-        # fork M11: the stored form is hyphenated (upstream #2845 slugs to my_project)
-        assert stored["metadatas"][0]["wing"] == "my-project"
+        assert stored["metadatas"][0]["wing"] == "my_project"
         # Rooms are NOT canonicalized in this change — they stay as given.
         assert stored["metadatas"][0]["room"] == "Scratch-Room"
 
@@ -177,10 +176,9 @@ class TestWriteTools:
             content="This is a test memory about Python decorators and metaclasses.",
         )
         assert result["success"] is True
-        assert result["wing"] == "test-wing"  # fork M11: write paths canonicalise the wing
+        assert result["wing"] == "test_wing"
         assert result["room"] == "test_room"
-        # fork M11: the drawer id is derived from the canonical wing
-        assert result["drawer_id"].startswith("drawer_test-wing_test_room_")
+        assert result["drawer_id"].startswith("drawer_test_wing_test_room_")
 
     def test_add_drawer_duplicate_detection(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
@@ -986,7 +984,7 @@ class TestWriteTools:
 
         result = tool_update_drawer("drawer_proj_backend_aaa", wing="new_wing", room="new_room")
         assert result["success"] is True
-        assert result["wing"] == "new-wing"  # fork M11: write paths canonicalise the wing
+        assert result["wing"] == "new_wing"
         assert result["room"] == "new_room"
 
     def test_update_drawer_case_only_wing_rename_applies(
@@ -1060,7 +1058,6 @@ class TestWriteTools:
 
         result = tool_update_drawer(drawer_id, wing="StableWing", room="stable_room")
         assert result["success"] is True
-        # fork M11: write paths canonicalise the wing (StableWing -> stablewing)
         assert result["wing"] == "stablewing"
         assert result["room"] == "stable_room"
 

@@ -140,38 +140,46 @@ def test_distinct_drawers_unchanged(mcp, monkeypatch):
 
 # ------------------------------------------------------------------ read filters (DR41)
 
-CANON_WINGS = {"cowork", "brave-new-media", "claude-code", "jarvis-ops", "dsc"}
+CANON_WINGS = {"cowork", "brave_new_media", "claude_code", "jarvis_ops", "dsc"}
 
 
-def test_read_wing_prefers_canonical_when_held(mcp, monkeypatch):
+def test_read_wing_is_the_canonical_name(mcp, monkeypatch):
     rw = getattr(mcp_server, "_read_wing", None)
     assert rw is not None, "_read_wing missing"
-    monkeypatch.setattr(mcp_server, "_known_wings", lambda: {"cowork", "wing_lily"})
     assert rw(None) is None
     assert rw("") == ""
     assert rw("wing_cowork") == "cowork"
     assert rw("WING_Cowork") == "cowork"
-    # legacy data under the raw name stays reachable (upstream #2185 shape)
-    assert rw("wing_lily") == "wing_lily"
-    # neither form held: the name as given
-    assert rw("wing_nothing_here") == "wing_nothing_here"
+    assert rw("jarvis-ops") == "jarvis_ops"
+    assert rw("wing_lily") == "lily"
+    assert rw("wing_nothing_here") == "nothing_here"
 
 
-def test_read_wing_skips_lookup_for_canonical_names(mcp, monkeypatch):
+def test_read_wing_does_not_narrow_the_read(mcp):
+    """Legacy data under the raw name stays reachable (upstream #2185 shape):
+    the drawer filter expands the canonical name to every stored spelling."""
+    from mempalace.config import wing_aliases
+
+    assert "wing_lily" in wing_aliases(mcp_server._read_wing("wing_lily"), {"wing_lily"})
+    assert "jarvis-ops" in wing_aliases(mcp_server._read_wing("jarvis-ops"), {"jarvis-ops"})
+
+
+def test_read_wing_needs_no_wing_lookup(mcp, monkeypatch):
     def boom():
-        raise AssertionError("wing lookup ran for an already-canonical name")
+        raise AssertionError("wing lookup ran")
 
     monkeypatch.setattr(mcp_server, "_known_wings", boom)
     assert mcp_server._read_wing("dsc") == "dsc"
-    assert mcp_server._read_wing("tech-radar") == "tech-radar"
+    assert mcp_server._read_wing("tech-radar") == "tech_radar"
 
 
 @pytest.mark.parametrize(
     "raw, canon",
     [
         ("wing_cowork", "cowork"),
-        ("WING_BNM", "brave-new-media"),
-        ("claude_code", "claude-code"),
+        ("WING_BNM", "brave_new_media"),
+        ("claude_code", "claude_code"),
+        ("claude-code", "claude_code"),
         ("dsc", "dsc"),
     ],
 )
@@ -224,6 +232,8 @@ def test_tunnel_and_hallway_filters_are_canonical(mcp, monkeypatch):
     mcp.tool_find_tunnels(wing_a="wing_bnm", wing_b="Claude_Code")
     mcp.tool_follow_tunnels(wing="wing_cowork", room="diary")
     assert seen["lt"] == "cowork"
-    assert seen["lh"] == "jarvis-ops"
-    assert seen["ft"] == ("brave-new-media", "claude-code")
+    # hallways are keyed by the stored wing: every spelling is matched
+    assert seen["lh"][0] == "jarvis_ops"
+    assert {"jarvis-ops", "wing_jarvis", "jarvis", "project_jarvis_ops"} <= set(seen["lh"])
+    assert seen["ft"] == ("brave_new_media", "claude_code")
     assert seen["fo"] == ("cowork", "diary")

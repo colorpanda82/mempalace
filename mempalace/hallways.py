@@ -1117,24 +1117,43 @@ def compute_hallways_for_wing(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def list_hallways(wing: Optional[str] = None, config=None) -> list[dict]:
-    """List hallway records. Filter by ``wing`` if specified."""
+def _wing_names(wing) -> Optional[tuple]:
+    """``wing`` as a tuple of names, or ``None`` for no filter.
+
+    Fork: a list or tuple of names filters by any of them, so a read can match
+    every spelling a wing was stored under (``config.wing_aliases``).
+    """
+    if wing is None:
+        return None
+    if isinstance(wing, (list, tuple, set, frozenset)):
+        return tuple(dict.fromkeys(w for w in wing if isinstance(w, str)))
+    return (wing,)
+
+
+def _wing_where(names: Optional[tuple]) -> tuple[str, tuple]:
+    if names is None:
+        return "", ()
+    return f"WHERE wing IN ({', '.join('?' for _ in names) or 'NULL'})", names
+
+
+def list_hallways(wing=None, config=None) -> list[dict]:
+    """List hallway records. Filter by ``wing`` (a name, or a list of names) if specified."""
+    names = _wing_names(wing)
     conn = _reader(config)
     if conn is None:
         all_hallways = _load_hallways_json(config)
-        if wing is None:
+        if names is None:
             return list(all_hallways)
-        return [h for h in all_hallways if h.get("wing") == wing]
+        return [h for h in all_hallways if h.get("wing") in names]
     with contextlib.closing(conn):
-        if wing is None:
+        if names is None:
             return _records(conn.execute("SELECT record FROM hallways ORDER BY rowid"))
-        return _records(
-            conn.execute("SELECT record FROM hallways WHERE wing = ? ORDER BY rowid", (wing,))
-        )
+        where, params = _wing_where(names)
+        return _records(conn.execute(f"SELECT record FROM hallways {where} ORDER BY rowid", params))
 
 
 def list_hallways_page(
-    wing: Optional[str] = None, limit: int = 100, offset: int = 0, config=None
+    wing=None, limit: int = 100, offset: int = 0, config=None
 ) -> tuple[list[dict], int]:
     """One page of hallway records, strongest first, and how many there are.
 
@@ -1149,7 +1168,7 @@ def list_hallways_page(
             key=lambda h: -int(h.get("co_occurrence_count") or 0),
         )
         return rows[offset : offset + limit], len(rows)
-    where, params = ("WHERE wing = ?", (wing,)) if wing is not None else ("", ())
+    where, params = _wing_where(_wing_names(wing))
     with contextlib.closing(conn):
         total = conn.execute(f"SELECT COUNT(*) FROM hallways {where}", params).fetchone()[0]
         page = _records(
