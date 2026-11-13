@@ -787,9 +787,11 @@ def _resolve_wing(convo_path: Path, wing: Optional[str]) -> str:
          wing-slug producers stay in sync.
     """
     from .config import normalize_wing_name
+    from .wing_aliases import mined_wing
 
     if wing:
-        return wing
+        # Fork: the canonical wing, the name ws-migrate-wings re-keys to.
+        return mined_wing(wing)
     if _is_ai_tool_path(convo_path):
         return "wing_api"
     return normalize_wing_name(convo_path.name)

@@ -1137,7 +1137,8 @@ def test_mine_formats_calls_compute_topic_tunnels_after_loop(_mine_formats_mocks
     ):
         mine_formats(format_dir=str(tmp), palace_path=str(tmp / "palace"), wing="wing_aya")
     p_tun.assert_called_once()
-    assert p_tun.call_args.args == ("wing_aya",)
+    # Fork: a mine uses the canonical wing, ``wing_aya`` -> ``aya``.
+    assert p_tun.call_args.args == ("aya",)
     assert p_tun.call_args.kwargs["config"].palace_path == str(tmp / "palace")
 
 

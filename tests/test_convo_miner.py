@@ -807,7 +807,8 @@ def test_same_content_mined_into_a_second_wing_files_real_drawers():
 
         client = chromadb.PersistentClient(path=palace_path)
         col = client.get_collection("mempalace_drawers")
-        wing_b_docs = col.get(where={"wing": "wing_b"}, include=["documents", "metadatas"])
+        # Fork: a mine stores the canonical wing, ``wing_b`` -> ``b``.
+        wing_b_docs = col.get(where={"wing": "b"}, include=["documents", "metadatas"])
         real_drawers = [
             d
             for d, m in zip(wing_b_docs["documents"], wing_b_docs["metadatas"])

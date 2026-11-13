@@ -70,6 +70,7 @@ from .project_config import (  # noqa: F401
 )
 from .source_identity import source_directory_identity
 from .timeutil import utc_now_iso
+from .wing_aliases import mined_wing
 
 logger = logging.getLogger(__name__)
 
@@ -2262,7 +2263,9 @@ def _mine_impl(
     cfg_chunk_overlap = palace_config.chunk_overlap
     cfg_min_chunk_size = palace_config.min_chunk_size
 
-    wing = wing_override or _project_wing(config.get("wing"), project_path)
+    # Fork: store the canonical wing (jarvis-ops -> jarvis_ops), the name a
+    # migrated palace holds; the yaml keeps whatever spelling it was written in.
+    wing = mined_wing(wing_override or _project_wing(config.get("wing"), project_path))
     rooms = config.get("rooms", [{"name": "general", "description": "All project files"}])
     exclude_patterns = config.get("exclude_patterns", [])
 
@@ -2645,6 +2648,37 @@ def _arm_hook_mine_exit_watchdog(exit_code: int = 0) -> Optional[_HookMineExitWa
     return handle
 
 
+def _fold_wing_spellings(topics_map, wing: str):
+    """``topics_map`` with every key that spells ``wing`` merged under ``wing``.
+
+    Fork: a mine stores the canonical wing (``wing_two`` -> ``two``), while
+    ``init`` keyed the registry by the slug it wrote into ``mempalace.yaml``;
+    until ``ws-migrate-wings`` re-keys the registry, both name one wing.
+    """
+    from .wing_aliases import canonical_wing
+
+    if not topics_map or not isinstance(wing, str) or not wing.strip():
+        return topics_map
+
+    def canon(name):
+        try:
+            return canonical_wing(name)
+        except ValueError:
+            return name
+
+    target = canon(wing)
+    folded, own = {}, []
+    for key, topics in topics_map.items():
+        if isinstance(key, str) and key.strip() and canon(key) == target:
+            if isinstance(topics, (list, tuple)):
+                own.extend(t for t in topics if t not in own)
+        else:
+            folded[key] = topics
+    if own:
+        folded[wing] = own
+    return folded
+
+
 def _compute_topic_tunnels_for_wing(wing: str, config=None) -> int:
     """Drop tunnels between ``wing`` and every other wing that shares
     confirmed topics, honoring the ``topic_tunnel_min_count`` config knob.
@@ -2655,7 +2689,7 @@ def _compute_topic_tunnels_for_wing(wing: str, config=None) -> int:
     from .config import MempalaceConfig
     from .palace_graph import topic_tunnels_for_wing
 
-    topics_map = get_topics_by_wing()
+    topics_map = _fold_wing_spellings(get_topics_by_wing(), wing)
     if not topics_map or wing not in topics_map:
         return 0
     cfg = config or MempalaceConfig()

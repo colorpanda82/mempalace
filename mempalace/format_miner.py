@@ -788,6 +788,11 @@ def _mine_formats_impl(
     format_path = Path(format_dir).expanduser().resolve()
     if not wing:
         wing = normalize_wing_name(format_path.name)
+    else:
+        from .wing_aliases import mined_wing
+
+        # Fork: the canonical wing, the name ws-migrate-wings re-keys to.
+        wing = mined_wing(wing)
 
     # Load the project's mempalace.yaml (rooms list + wing override) so
     # detect_room has real categories to route into. Mirrors miner.py:1154.

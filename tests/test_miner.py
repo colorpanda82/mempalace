@@ -1286,7 +1286,9 @@ def _remine_after_rename(tmp_path, old):
     return sorted(_wing_rows(palace_path))
 
 
-@pytest.mark.parametrize(("old", "new"), [("c++", "c"), ("wing-c++", "wing_c")])
+# Fork: a mine stores canonical_stored_wing, which strips the ``wing_`` prefix,
+# so the slug ``wing_c`` of ``wing-c++`` is stored as ``c``.
+@pytest.mark.parametrize(("old", "new"), [("c++", "c"), ("wing-c++", "c")])
 def test_a_renamed_wing_moves_changed_files_without_duplicating_them(tmp_path, old, new):
     """A palace can already hold the old name: nothing is lost or filed twice."""
     assert _remine_after_rename(tmp_path, old) == [("a.md", new), ("b.md", old)]
@@ -2463,7 +2465,9 @@ def test_mine_creates_topic_tunnels_for_shared_topics(tmp_path, monkeypatch):
     assert rooms == {"topic:foo"}
     assert listed[0]["kind"] == "topic"
     wings = {listed[0]["source"]["wing"], listed[0]["target"]["wing"]}
-    assert wings == {"wing_one", "wing_two"}
+    # Fork: the mine stores the canonical ``two``; the registry still keys
+    # ``wing_two``, which the tunnel pass reads as the same wing.
+    assert wings == {"wing_one", "two"}
 
 
 def test_mine_no_tunnel_when_threshold_blocks_overlap(tmp_path, monkeypatch):

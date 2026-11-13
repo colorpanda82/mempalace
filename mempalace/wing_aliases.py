@@ -106,6 +106,22 @@ def canonical_stored_wing(value: str, field_name: str = "wing") -> str:
     return sanitize_name(canonical_wing(slug), field_name)
 
 
+def mined_wing(value):
+    """The wing a miner stores for a ``mempalace.yaml`` / ``--wing`` value.
+
+    :func:`canonical_stored_wing`, so a mine files under the name
+    ``ws-migrate-wings`` re-keys to instead of minting the old spelling again.
+    A value upstream's validation rejects is returned as given: the miners
+    filed it before this rule, and a mine must not fail over the name.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return value
+    try:
+        return canonical_stored_wing(value)
+    except ValueError:
+        return value
+
+
 def _spellings(slug: str) -> list[str]:
     hyphens = slug.replace("_", "-")
     out = []
