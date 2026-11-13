@@ -41,6 +41,7 @@ from .palace import (
 )
 from .source_identity import identity_metadata
 from .timeutil import utc_now_iso
+from .wing_aliases import canonical_wing, mined_wing
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,30 @@ def _diary_closet_id_base(wing: str, date_str: str) -> str:
     return f"closet_diary_{suffix}"
 
 
+def _prior_state(state: dict, wing: str, name: str):
+    """``(key, entry)`` of the state recorded for ``name`` under any spelling of ``wing``.
+
+    Fork: ingest stores the canonical wing, so a file ingested before under
+    ``jarvis-ops`` has its hash under ``jarvis-ops|<name>``. Reading that entry
+    keeps an unchanged file skipped; without it the file would be re-filed
+    under new ids next to its old drawers.
+    """
+    key = f"{wing}|{name}"
+    if key in state:
+        return key, state[key]
+    for other, entry in state.items():
+        spelled, sep, other_name = other.rpartition("|")
+        if not sep or other_name != name or not spelled.strip():
+            continue
+        try:
+            same = canonical_wing(spelled) == wing
+        except ValueError:
+            same = False
+        if same and isinstance(entry, dict):
+            return other, entry
+    return key, {}
+
+
 def ingest_diaries(
     diary_dir,
     palace_path,
@@ -106,6 +131,9 @@ def ingest_diaries(
     every entry's closets from scratch (purging stale ones); the default
     incremental mode only processes entries appended since the last run.
     """
+    # Fork: the canonical wing (jarvis-ops -> jarvis_ops), the name
+    # ws-migrate-wings re-keys to, so ingest does not mint the old spelling.
+    wing = mined_wing(wing)
     diary_dir = Path(diary_dir).expanduser().resolve()
     if not diary_dir.exists():
         print(f"Diary directory not found: {diary_dir}")
@@ -159,7 +187,11 @@ def ingest_diaries(
         # Skip if content hasn't changed. Hash-based — size alone false-negatives
         # on same-length edits (e.g. "teh" → "the"), silently dropping real edits.
         state_key = f"{wing}|{diary_path.name}"
-        prev_entry = state.get(state_key, {})
+        prior_key, prev_entry = _prior_state(state, wing, diary_path.name)
+        if prior_key != state_key:
+            state.pop(prior_key, None)
+            if prev_entry:
+                state[state_key] = prev_entry
         prev_hash = prev_entry.get("content_hash")
         prev_size = prev_entry.get("size", 0)
         curr_size = len(text)
