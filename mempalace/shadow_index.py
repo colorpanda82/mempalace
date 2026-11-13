@@ -21,11 +21,12 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import paths
 from .config import MempalaceConfig
 from .knowledge_graph import DEFAULT_KG_PATH
 from .searcher import search_memories
 
-AUDIT_PATH = Path.home() / ".mempalace" / "shadow-audits.jsonl"
+AUDIT_PATH = paths.state_path("shadow-audits.jsonl")
 
 
 def _sample_triples(kg_path, n=20, only_active=True):

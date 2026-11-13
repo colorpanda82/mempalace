@@ -12,9 +12,11 @@ from __future__ import annotations
 import json
 import os
 
+from . import paths
+
 CANARY_FILE = os.environ.get(
     "MEMPALACE_CANARY_FILE",
-    os.path.expanduser("~/.mempalace/canary_ids.json"),
+    paths.state_str("canary_ids.json"),
 )
 
 

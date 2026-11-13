@@ -248,7 +248,7 @@ def resolve_entity(name: str, *, fact_count=None, prefer_literal_if_present: boo
 
     scored = _score(_separator_variants(original))
     if not scored:
-        # Since 3.12 (#2770) an id keeps a literal underscore (``%5F``), so
+        # Since 3.12 an id keeps a literal underscore (``%5F``), so
         # ``jarvis_dashboard`` no longer shares the id of an entity stored as
         # ``Jarvis Dashboard`` the way it did through 3.11. Try the all-space
         # spelling, but only as a fallback: when a ``_``/``-`` variant holds

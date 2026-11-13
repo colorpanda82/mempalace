@@ -27,6 +27,7 @@ import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
 
+from . import paths
 from .config import MempalaceConfig
 from .palace import get_collection
 
@@ -37,8 +38,8 @@ NAMESPACE_HALFLIVES_DAYS = {
     "wing": float("inf"),
 }
 
-DRY_RUN_SENTINEL = Path.home() / ".mempalace" / "janitor-dry-run-since.txt"
-REPORT_DIR = Path.home() / ".mempalace" / "janitor-reports"
+DRY_RUN_SENTINEL = paths.state_path("janitor-dry-run-since.txt")
+REPORT_DIR = paths.state_path("janitor-reports")
 DRY_RUN_MIN_DAYS = 7
 
 
@@ -327,7 +328,7 @@ def prune_expired(palace_path=None, dry_run=True):
             print(f"prune_expired: {action} [{wing}/{room}] {did[:48]}... (expired {exp_str})")
         if not dry_run:
             # Hub-first (v3.9.0+): while a `mempalace serve` hub owns the palace a
-            # direct col.delete() is exactly the racing-writer path #2079 forbids.
+            # direct col.delete() is the racing second writer the writer lease forbids.
             # Route through the hub's delete tool when one is registered; the
             # direct delete stays for palaces no hub serves.
             from .cli_workspace import _hub_for, call_tool

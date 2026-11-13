@@ -17,7 +17,7 @@ Design contract:
     the first import of ``mcp_server`` binds that module's global ``_config`` to
     the requested palace, matching how the MCP server resolves its palace.
   * Hub first (v3.9.0+). Local file-backed palaces have ONE process-lifetime
-    writer (#2079); when a ``mempalace serve`` hub owns the palace, an in-process
+    writer; when a ``mempalace serve`` hub owns the palace, an in-process
     ``tool_*`` write is refused with "palace is held by PID". ``call_tool`` is
     the single seam every workspace writer goes through: it forwards to a live
     hub as an MCP ``tools/call`` when one is registered for the palace, and
@@ -596,7 +596,7 @@ def register(sub):
     # a caller-set bound, which switches off the union/fusion-depth override.
     p.add_argument("--max-distance", type=float, default=None)
     # Date window on filed_at, [since, before). Drawers without filed_at are
-    # excluded while a bound is set (v3.7.0 #2000).
+    # excluded while a bound is set (since v3.7.0).
     p.add_argument("--since", help="ISO date/datetime, inclusive")
     p.add_argument("--before", help="ISO date/datetime, exclusive")
 

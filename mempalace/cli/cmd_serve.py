@@ -65,7 +65,7 @@ def _cmd_rebuild_index(args):
     from ..knowledge_graph import KnowledgeGraph
 
     # The document store lives in the KG file the MCP writes resolve to, so read
-    # it through 3.12's one resolver (#2850), the way ``mempalace kg`` does.
+    # it through the one KG path resolver, the way ``mempalace kg`` does.
     palace = getattr(args, "palace", None)
     palace_path = os.path.expanduser(palace) if palace else MempalaceConfig().palace_path
     db_path = (
