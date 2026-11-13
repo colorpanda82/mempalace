@@ -266,3 +266,28 @@ def test_assert_no_collisions_ignores_a_scope_key_the_legacy_row_lacks():
     ]
     col = _MockCollection(existing={"drawer_X": {"source_file": "/c.jsonl", "chunk_index": 0}})
     assert_no_collisions(proposed, col)
+
+
+@pytest.mark.parametrize("incoming", ["jarvis-ops", "wing_jarvis", "Jarvis Ops"])
+def test_assert_no_collisions_reads_spellings_of_one_wing_as_one_owner(incoming):
+    """ws-migrate-wings keeps a 3.11 id (``drawer_jarvis-ops_...``) and rewrites
+    its wing to ``jarvis_ops``: a writer still using another spelling of that
+    wing owns the row (fork)."""
+    proposed = [
+        ("drawer_jarvis-ops_x", {"source_file": "/f.md", "chunk_index": 0, "wing": incoming})
+    ]
+    col = _MockCollection(
+        existing={
+            "drawer_jarvis-ops_x": {"source_file": "/f.md", "chunk_index": 0, "wing": "jarvis_ops"}
+        }
+    )
+    assert_no_collisions(proposed, col)
+
+
+def test_assert_no_collisions_still_raises_for_a_different_canonical_wing():
+    proposed = [("drawer_X", {"source_file": "/f.md", "chunk_index": 0, "wing": "bnm-hive"})]
+    col = _MockCollection(
+        existing={"drawer_X": {"source_file": "/f.md", "chunk_index": 0, "wing": "jarvis_ops"}}
+    )
+    with pytest.raises(CollisionError):
+        assert_no_collisions(proposed, col)

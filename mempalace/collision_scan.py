@@ -56,11 +56,30 @@ def _metadata_key(meta: dict) -> tuple:
 _OWNER_KEYS = ("wing", "extract_mode")
 
 
+def _owner_value(key: str, value):
+    """``value`` as owner identity: a wing compares by its canonical name.
+
+    Fork: ``ws-migrate-wings`` rewrites a drawer's ``wing`` to the canonical
+    name and keeps its id, so a stored ``jarvis_ops`` drawer can carry the id a
+    ``jarvis-ops`` writer derives. Both spellings are one owner.
+    """
+    if key != "wing" or not isinstance(value, str) or not value.strip():
+        return value
+    from .wing_aliases import canonical_wing
+
+    try:
+        return canonical_wing(value)
+    except ValueError:
+        return value
+
+
 def _same_owner(stored: dict, incoming: dict) -> bool:
     if stored.get("source_file") != incoming.get("source_file"):
         return False
     return all(
-        stored.get(key) is None or incoming.get(key) is None or stored[key] == incoming[key]
+        stored.get(key) is None
+        or incoming.get(key) is None
+        or _owner_value(key, stored[key]) == _owner_value(key, incoming[key])
         for key in _OWNER_KEYS
     )
 
