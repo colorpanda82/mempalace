@@ -281,3 +281,58 @@ def test_topics_by_wing_is_left_alone_for_a_palace_copy(palace):
     path, _config = palace
     result = wing_migrate.migrate_wings(path, explicit=True)
     assert result["topics_by_wing"].startswith("skipped")
+
+
+def _content_hashes(root):
+    """``{file: sha256}`` for every file under ``root``, nothing left out."""
+    import hashlib
+
+    out = {}
+    for base, _dirs, files in os.walk(root):
+        for name in files:
+            path = os.path.join(base, name)
+            with open(path, "rb") as handle:
+                out[os.path.relpath(path, root)] = hashlib.sha256(handle.read()).hexdigest()
+    return out
+
+
+def test_dry_run_in_a_fresh_process_writes_no_file(tmp_path):
+    """A fresh CLI process opens nothing for write: no Chroma client (which
+    records a write and rewrites the HNSW files), no KG or hallway sidecars, no
+    lease lock files. Checked by content hash over the palace and the files
+    beside it (hallways, tunnels, the palace-side lock)."""
+    import subprocess
+    import sys
+
+    from mempalace.backends import _inproc_sqlite
+    from mempalace.palace import get_backend_for_palace
+
+    path = str(tmp_path / "palace")
+    config = _seed(path)
+    get_backend_for_palace(path).close_palace(path)
+    _inproc_sqlite.release_all()
+    assert os.path.isfile(hallways._get_hallway_db(config))
+    assert os.path.isfile(os.path.join(path, "knowledge_graph.sqlite3"))
+    before = _content_hashes(tmp_path)
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    code = (
+        "import sys, runpy; sys.path.insert(0, sys.argv[1]); "
+        "sys.argv = ['mempalace', 'ws-migrate-wings', '--palace', sys.argv[2]]; "
+        "runpy.run_module('mempalace', run_name='__main__')"
+    )
+    env = {**os.environ, "MEMPALACE_HUB_FORWARD": "0"}
+    env.pop("PYTHONPATH", None)
+    done = subprocess.run(
+        [sys.executable, "-c", code, root, path],
+        cwd=str(tmp_path),
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert done.returncode == 0, done.stderr
+    assert "(DRY RUN)" in done.stdout and "jarvis-ops -> jarvis_ops: 3 drawers" in done.stdout
+    assert "1 documents" in done.stdout and "1 hallways" in done.stdout
+
+    assert _content_hashes(tmp_path) == before

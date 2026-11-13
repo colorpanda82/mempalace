@@ -28,9 +28,11 @@ project directories.
 
 Metadata collections move through upstream's ``migrate.plan_wing_renames``
 and ``_apply_wing_updates`` (batched backend ``update``, ids untouched, no
-re-embedding). Wings whose targets coincide merge. The run holds the palace
-writer lease (``mine_palace_lock``) and refuses while a hub serves the
-palace. Idempotent: a second run finds nothing to rename.
+re-embedding). Wings whose targets coincide merge. An apply holds the palace
+writer lease (``mine_palace_lock``); every run refuses while a hub serves the
+palace. A dry run reads ``chroma.sqlite3`` and the other sqlite stores
+read-only, without a Chroma client or the lease's lock files, so it changes no
+file. Idempotent: a second run finds nothing to rename.
 """
 
 from __future__ import annotations
@@ -92,6 +94,112 @@ def _collections(palace_path: str, read_only: bool = False) -> dict:
     return out
 
 
+def _read_only(db: str, read):
+    """``read(conn)`` on ``db`` through a connection that creates no file.
+
+    ``mode=ro`` alone still creates the ``-wal`` and ``-shm`` sidecars of a WAL
+    database nothing holds open. With both absent the database is fully
+    checkpointed and ``immutable=1`` reads it as it is; otherwise some
+    connection has it open and ``mode=ro`` reads through the sidecars it made.
+    """
+    from pathlib import Path
+
+    from .config import _is_wal_without_sidecars
+
+    uri = Path(os.path.abspath(db)).as_uri() + "?mode=ro"
+    if _is_wal_without_sidecars(db):
+        uri += "&immutable=1"
+    conn = sqlite3.connect(uri, uri=True, timeout=30)
+    try:
+        return read(conn)
+    finally:
+        conn.close()
+
+
+_COLLECTION_WINGS_SQL = """
+    SELECT wm.string_value, COUNT(*)
+    FROM embeddings e
+    JOIN segments s ON e.segment_id = s.id AND s.scope = 'METADATA'
+    JOIN collections c ON s.collection = c.id
+    JOIN embedding_metadata wm ON wm.id = e.id AND wm.key = 'wing'
+    WHERE c.name = ? AND wm.string_value IS NOT NULL
+    GROUP BY wm.string_value
+"""
+
+
+def _sqlite_collection_counts(palace_path: str) -> Optional[dict]:
+    """``{store: {wing: n}}`` for the metadata collections, read from ``chroma.sqlite3``.
+
+    The same rows :func:`_collection_counts` reads through a Chroma client,
+    without opening one: a client open records a write and rewrites the HNSW
+    files even when nothing is changed. ``None`` when the palace has no
+    ``chroma.sqlite3`` or the read fails, so the caller opens the collections.
+    """
+    from .config import get_configured_collection_name
+    from .palace import AAAK_COLLECTION_NAME
+    from .stored_text import decode_value
+
+    db = os.path.join(palace_path, "chroma.sqlite3")
+    if not os.path.isfile(db):
+        return None
+    names = {
+        "drawers": get_configured_collection_name(),
+        "closets": "mempalace_closets",
+        "aaak": AAAK_COLLECTION_NAME,
+    }
+
+    def read(conn):
+        out = {}
+        for store, name in names.items():
+            if not conn.execute("SELECT 1 FROM collections WHERE name = ?", (name,)).fetchone():
+                continue
+            counts: dict = defaultdict(int)
+            for wing, n in conn.execute(_COLLECTION_WINGS_SQL, (name,)):
+                wing = decode_value(wing)
+                if isinstance(wing, str):
+                    counts[wing] += int(n)
+            out[store] = dict(counts)
+        return out
+
+    try:
+        return _read_only(db, read)
+    except sqlite3.Error:
+        return None
+
+
+def _hallway_counts_read_only(config) -> dict:
+    """:func:`hallways.hallway_wing_counts` through a connection that creates no file."""
+    from .hallways import _IMPORTED_KEY, _get_hallway_db, _load_hallways_json
+
+    def read(conn):
+        has_meta = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta'"
+        ).fetchone()
+        if (
+            not has_meta
+            or not conn.execute("SELECT 1 FROM meta WHERE key = ?", (_IMPORTED_KEY,)).fetchone()
+        ):
+            return None
+        rows = conn.execute("SELECT wing, COUNT(*) FROM hallways GROUP BY wing").fetchall()
+        return {w: n for w, n in rows if isinstance(w, str)}
+
+    db = _get_hallway_db(config)
+    counts = None
+    if os.path.exists(db):
+        try:
+            counts = _read_only(db, read)
+        except sqlite3.Error:
+            counts = None
+    if counts is None:
+        # Nothing imported yet: the records are still in hallways.json.
+        counts = {}
+        for h in _load_hallways_json(config):
+            wing = h.get("wing") if isinstance(h, dict) else None
+            if isinstance(wing, str):
+                counts[wing] = counts.get(wing, 0) + 1
+    return counts
+
+
 def _collection_counts(col) -> dict:
     from .migrate import _iter_collection_items
 
@@ -110,9 +218,19 @@ def _documents_db(palace_path: str, explicit: bool) -> Optional[str]:
     return path if os.path.isfile(path) else None
 
 
-def _documents_counts(db: Optional[str]) -> dict:
+def _documents_counts(db: Optional[str], *, create_nothing: bool = False) -> dict:
     if not db:
         return {}
+    if create_nothing:
+
+        def read(conn):
+            return conn.execute("SELECT wing, COUNT(*) FROM documents GROUP BY wing").fetchall()
+
+        try:
+            rows = _read_only(db, read)
+        except sqlite3.OperationalError:
+            return {}
+        return {w: n for w, n in rows if isinstance(w, str)}
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
         rows = conn.execute("SELECT wing, COUNT(*) FROM documents GROUP BY wing").fetchall()
@@ -162,15 +280,28 @@ def _topics_counts() -> dict:
 # ── plan / apply ─────────────────────────────────────────────────────────────
 
 
-def _counts(palace_path: str, config, explicit: bool, cols: dict, with_topics: bool) -> dict:
-    """``{store: {wing: n}}`` for every store this migration covers."""
+def _counts(palace_path: str, config, explicit: bool, cols, with_topics: bool) -> dict:
+    """``{store: {wing: n}}`` for every store this migration covers.
+
+    ``cols`` is ``None`` for a dry run: every store is then read without
+    opening a Chroma client and through sqlite connections that create no
+    file, so the plan leaves the palace byte for byte as it was.
+    """
     from .hallways import hallway_wing_counts
     from .palace_graph import tunnel_wing_counts
 
-    counts = {store: _collection_counts(col) for store, col in cols.items()}
-    counts["hallways"] = hallway_wing_counts(config)
+    dry = cols is None
+    if dry:
+        counts = _sqlite_collection_counts(palace_path)
+        if counts is None:
+            cols = _collections(palace_path, read_only=True)
+    if cols is not None:
+        counts = {store: _collection_counts(col) for store, col in cols.items()}
+    counts["hallways"] = _hallway_counts_read_only(config) if dry else hallway_wing_counts(config)
     counts["tunnels"] = tunnel_wing_counts(config)
-    counts["documents"] = _documents_counts(_documents_db(palace_path, explicit))
+    counts["documents"] = _documents_counts(
+        _documents_db(palace_path, explicit), create_nothing=dry
+    )
     counts["topics_by_wing"] = _topics_counts() if with_topics else {}
     for store in STORES:
         counts.setdefault(store, {})
@@ -219,6 +350,9 @@ def migrate_wings(palace_path: str, *, apply: bool = False, explicit: bool = Fal
     _check_no_hub(palace_path)
     config = MempalaceConfig(palace_path=palace_path)
     with_topics = _is_configured_palace(palace_path)
+    if not apply:
+        # A dry run writes nothing, not even the writer lease's lock files.
+        return _migrate_locked(palace_path, config, False, explicit, with_topics)
     try:
         with mine_palace_lock(palace_path):
             return _migrate_locked(palace_path, config, apply, explicit, with_topics)
@@ -245,7 +379,11 @@ def _migrate_locked(palace_path, config, apply, explicit, with_topics) -> dict:
     from .palace_graph import rename_tunnel_wings
 
     counts = _counts(
-        palace_path, config, explicit, _collections(palace_path, read_only=True), with_topics
+        palace_path,
+        config,
+        explicit,
+        _collections(palace_path, read_only=True) if apply else None,
+        with_topics,
     )
     renames = plan(counts)
     stored = set()
