@@ -153,5 +153,46 @@ class TestMutantWouldFail:
         )
 
 
+class TestAddDrawerDuplicateCheckUnderTailMerge:
+    """A repeat add of runt-tailed content is found, not re-written.
+
+    The probe used to look for the last chunk id fixed-width slicing would
+    give (``_chunk_000002`` for 1607 chars), which the merged write never
+    creates, so every repeat re-upserted the chunks instead of answering
+    ``already_exists``.
+    """
+
+    def _mcp(self, monkeypatch, config, kg):
+        monkeypatch.setattr(mcp_server, "_config", config)
+        monkeypatch.setattr(mcp_server, "_get_kg", lambda *a, **kw: kg)
+        assert config.chunk_size == CHUNK and config.min_chunk_size == MIN_CHUNK
+        return mcp_server
+
+    def test_repeat_add_of_runt_tailed_content_is_already_exists(
+        self, monkeypatch, config, kg, collection
+    ):
+        mcp = self._mcp(monkeypatch, config, kg)
+        content = "CT4 duplicate probe. " + _runt_content(7)
+        first = mcp.tool_add_drawer(wing="ct4", room="dup", content=content)
+        # 1628 chars slice to 800/800/28; the 28-char runt merges into chunk 1
+        assert first["success"] and first["chunks"] == 2, first
+        second = mcp.tool_add_drawer(wing="ct4", room="dup", content=content)
+        assert second == {
+            "success": True,
+            "reason": "already_exists",
+            "drawer_id": first["drawer_id"],
+        }, second
+
+    def test_repeat_add_without_a_runt_is_still_already_exists(
+        self, monkeypatch, config, kg, collection
+    ):
+        mcp = self._mcp(monkeypatch, config, kg)
+        content = _runt_content(MIN_CHUNK)
+        first = mcp.tool_add_drawer(wing="ct4", room="dup", content=content)
+        assert first["success"] and first["chunks"] == 3, first
+        second = mcp.tool_add_drawer(wing="ct4", room="dup", content=content)
+        assert second.get("reason") == "already_exists", second
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

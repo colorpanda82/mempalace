@@ -610,6 +610,13 @@ def tool_add_drawer(
     else:
         last_chunk_idx = (len(content) - 1) // chunk_size
         idempotency_probe_ids = [drawer_id, f"{drawer_id}_chunk_{last_chunk_idx:06d}"]
+        # CT4: _chunk_spans merges a runt tail into its predecessor, so the
+        # write's last chunk can sit one index earlier than fixed-width slicing
+        # says. Probe the id the write below actually creates as well; the
+        # fixed-width id still finds rows filed before the merge existed.
+        merged_last_idx = _chunk_spans(content, chunk_size)[-1][0] // chunk_size
+        if merged_last_idx != last_chunk_idx:
+            idempotency_probe_ids.append(f"{drawer_id}_chunk_{merged_last_idx:06d}")
     try:
         existing = col.get(ids=idempotency_probe_ids, include=[])
         if _get_result_ids(existing):
