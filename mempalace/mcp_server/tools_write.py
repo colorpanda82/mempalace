@@ -606,21 +606,41 @@ def tool_add_drawer(
     #     re-call with identical oversized content does not duplicate
     #     the legacy row by adding fresh chunks under different ids.
     if len(content) <= chunk_size:
-        idempotency_probe_ids = [drawer_id]
+        probe_suffixes = [""]
     else:
         last_chunk_idx = (len(content) - 1) // chunk_size
-        idempotency_probe_ids = [drawer_id, f"{drawer_id}_chunk_{last_chunk_idx:06d}"]
+        probe_suffixes = ["", f"_chunk_{last_chunk_idx:06d}"]
         # CT4: _chunk_spans merges a runt tail into its predecessor, so the
         # write's last chunk can sit one index earlier than fixed-width slicing
         # says. Probe the id the write below actually creates as well; the
         # fixed-width id still finds rows filed before the merge existed.
         merged_last_idx = _chunk_spans(content, chunk_size)[-1][0] // chunk_size
         if merged_last_idx != last_chunk_idx:
-            idempotency_probe_ids.append(f"{drawer_id}_chunk_{merged_last_idx:06d}")
+            probe_suffixes.append(f"_chunk_{merged_last_idx:06d}")
+    # Fork: the id embeds the wing, and a palace filed before the 3.12 port
+    # (or migrated by ws-migrate-wings, which keeps ids) holds this text under
+    # the id of another spelling (drawer_jarvis-ops_...). Probe the ids of
+    # every spelling the reads match, in one get.
+    bases = [drawer_id]
+    try:
+        spellings = _palace_wing_aliases(wing)
+    except Exception:
+        logger.debug("wing spellings unavailable for %s", wing, exc_info=True)
+        spellings = []
+    for spelling in spellings:
+        base = make_drawer_id_from_content(spelling, room, content)
+        if base not in bases:
+            bases.append(base)
+    probe_owner = {f"{base}{suffix}": base for base in bases for suffix in probe_suffixes}
+    idempotency_probe_ids = list(probe_owner)
     try:
         existing = col.get(ids=idempotency_probe_ids, include=[])
-        if _get_result_ids(existing):
-            outcome = {"success": True, "reason": "already_exists", "drawer_id": drawer_id}
+        found_ids = _get_result_ids(existing)
+        if found_ids:
+            # Name the drawer that holds the text, not the id a write would mint.
+            found = {probe_owner.get(i) for i in found_ids}
+            held = next((base for base in bases if base in found), drawer_id)
+            outcome = {"success": True, "reason": "already_exists", "drawer_id": held}
             _wal_result("add_drawer", outcome)
             return outcome
     except Exception as e:
