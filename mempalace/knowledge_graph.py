@@ -428,8 +428,24 @@ class KnowledgeGraph:
             CREATE INDEX IF NOT EXISTS idx_triples_object ON triples(object);
             CREATE INDEX IF NOT EXISTS idx_triples_predicate ON triples(predicate);
             CREATE INDEX IF NOT EXISTS idx_triples_valid ON triples(valid_from, valid_to);
+
+            CREATE TABLE IF NOT EXISTS documents (
+                drawer_id         TEXT PRIMARY KEY,
+                content           TEXT NOT NULL,
+                wing              TEXT,
+                room              TEXT,
+                source_file       TEXT,
+                ingested_at       TEXT DEFAULT CURRENT_TIMESTAMP,
+                embedding_model   TEXT,
+                embedding_version INTEGER DEFAULT 1
+            );
+            CREATE INDEX IF NOT EXISTS idx_documents_source
+              ON documents(source_file);
+            CREATE INDEX IF NOT EXISTS idx_documents_wing_room
+              ON documents(wing, room);
         """)
         self._migrate_schema(conn)
+        self._migrate_schema_documents(conn)
         conn.commit()
 
     def _migrate_schema(self, conn):
@@ -447,6 +463,125 @@ class KnowledgeGraph:
             conn.execute("ALTER TABLE triples ADD COLUMN source_drawer_id TEXT")
         if "adapter_name" not in existing:
             conn.execute("ALTER TABLE triples ADD COLUMN adapter_name TEXT")
+        # G1b: atomic dedup of identical active triples. The v1 index keyed
+        # only (subject, predicate, object), which forbids what rewrite()
+        # deliberately writes: a successor open alongside a scheduled future
+        # row or another witness's row for the same fact. v2 keys the start
+        # and provenance too, so it still absorbs a racing duplicate add while
+        # admitting those distinct facts. v2 is looser than v1, so any palace
+        # that satisfied v1 builds v2 cleanly.
+        conn.execute("DROP INDEX IF EXISTS idx_triples_active_unique")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_triples_active_unique_v2 ON triples("
+            "subject, predicate, object, COALESCE(valid_from, ''), "
+            "COALESCE(source_closet, ''), COALESCE(source_file, ''), "
+            "COALESCE(source_drawer_id, ''), COALESCE(adapter_name, '')"
+            ") WHERE valid_to IS NULL"
+        )
+
+    def _migrate_schema_documents(self, conn):
+        """Add documents table to existing instances (F8 forward migration)."""
+        tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "documents" not in tables:
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS documents ("
+                "drawer_id TEXT PRIMARY KEY, "
+                "content TEXT NOT NULL, "
+                "wing TEXT, "
+                "room TEXT, "
+                "source_file TEXT, "
+                "ingested_at TEXT DEFAULT CURRENT_TIMESTAMP, "
+                "embedding_model TEXT, "
+                "embedding_version INTEGER DEFAULT 1)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_documents_source ON documents(source_file)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_documents_wing_room ON documents(wing, room)"
+            )
+
+    # ── Document store (F8 — raw-data canonical store) ───────────────────
+
+    def upsert_document(
+        self,
+        drawer_id: str,
+        content: str,
+        wing: str = None,
+        room: str = None,
+        source_file: str = None,
+        embedding_model: str = None,
+        embedding_version: int = 1,
+    ) -> None:
+        """Write or replace the raw text for a drawer.
+
+        Raw text survives independent of the ChromaDB vector index.
+        On embedding-model upgrade: wipe ChromaDB, re-embed from this
+        table, rebuild — zero source-data loss.
+        """
+        with self._lock:
+            conn = self._conn()
+            with conn:
+                conn.execute(
+                    "INSERT INTO documents"
+                    " (drawer_id, content, wing, room, source_file,"
+                    "  ingested_at, embedding_model, embedding_version)"
+                    " VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?)"
+                    " ON CONFLICT(drawer_id) DO UPDATE SET"
+                    "  content           = excluded.content,"
+                    "  wing              = excluded.wing,"
+                    "  room              = excluded.room,"
+                    "  source_file       = excluded.source_file,"
+                    "  ingested_at       = CURRENT_TIMESTAMP,"
+                    "  embedding_model   = excluded.embedding_model,"
+                    "  embedding_version = excluded.embedding_version",
+                    (
+                        drawer_id,
+                        content,
+                        wing or "",
+                        room or "",
+                        source_file or "",
+                        embedding_model or "",
+                        embedding_version,
+                    ),
+                )
+
+    def delete_document(self, drawer_id: str) -> None:
+        """Remove the raw-text record for a deleted drawer."""
+        with self._lock:
+            conn = self._conn()
+            with conn:
+                conn.execute("DELETE FROM documents WHERE drawer_id = ?", (drawer_id,))
+
+    def get_document(self, drawer_id: str):
+        """Return the raw-text record for one drawer, or None."""
+        with self._lock:
+            conn = self._conn()
+            row = conn.execute(
+                "SELECT * FROM documents WHERE drawer_id = ?", (drawer_id,)
+            ).fetchone()
+            return dict(row) if row else None
+
+    def iter_documents(self, batch_size: int = 100):
+        """Yield all documents as dicts in ingestion order (for rebuild-index)."""
+        offset = 0
+        while True:
+            with self._lock:
+                conn = self._conn()
+                rows = conn.execute(
+                    "SELECT * FROM documents ORDER BY ingested_at LIMIT ? OFFSET ?",
+                    (batch_size, offset),
+                ).fetchall()
+            if not rows:
+                break
+            yield from (dict(r) for r in rows)
+            offset += batch_size
+
+    def document_count(self) -> int:
+        """Return total raw-text records stored."""
+        with self._lock:
+            conn = self._conn()
+            return conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
 
     def _conn(self):
         if self._connection is None:
@@ -616,6 +751,13 @@ class KnowledgeGraph:
                         return replayed["id"]  # Identical closed assertion already stored
 
                 triple_id = make_triple_id(sub_id, pred, obj_id, valid_from, utc_now_iso())
+                # No concurrent writer can win the active slot after the SELECT
+                # above: the entity INSERT OR IGNORE opened the write transaction,
+                # so the SELECT saw the latest snapshot under the write lock, and
+                # any row on idx_triples_active_unique_v2's key would have matched
+                # it. A plain INSERT therefore only fails on a broken invariant
+                # (e.g. an id collision), and it fails loudly instead of returning
+                # an id that was never stored.
                 conn.execute(
                     """INSERT INTO triples (
                         id, subject, predicate, object, valid_from, valid_to,
@@ -664,11 +806,15 @@ class KnowledgeGraph:
                             "an inverted interval would be invisible to every KG query"
                         )
 
-                conn.execute(
+                cur = conn.execute(
                     "UPDATE triples SET valid_to=? "
                     "WHERE subject=? AND predicate=? AND object=? AND valid_to IS NULL",
                     (ended, sub_id, pred, obj_id),
                 )
+                # Return the match count so callers can tell "ended it" from
+                # "matched nothing". Previously this returned None and a
+                # no-op invalidate was indistinguishable from a real one.
+                return int(cur.rowcount or 0)
 
     def supersede(
         self,
@@ -872,6 +1018,31 @@ class KnowledgeGraph:
                 ).fetchone()
                 if existing:
                     return existing["id"]
+                # idx_triples_active_unique_v2 ignores confidence and folds NULL
+                # provenance into '', so a row on exactly that key (two aliases
+                # folding to one predicate at one boundary) is the same fact to
+                # the index: return it instead of raising IntegrityError.
+                clash = conn.execute(
+                    "SELECT id FROM triples "
+                    "WHERE subject=? AND predicate=? AND object=? AND valid_to IS NULL "
+                    "AND COALESCE(valid_from, '')=? "
+                    "AND COALESCE(source_closet, '')=COALESCE(?, '') "
+                    "AND COALESCE(source_file, '')=COALESCE(?, '') "
+                    "AND COALESCE(source_drawer_id, '')=COALESCE(?, '') "
+                    "AND COALESCE(adapter_name, '')=COALESCE(?, '')",
+                    (
+                        sub_id,
+                        pred,
+                        obj_id,
+                        boundary,
+                        row["source_closet"],
+                        row["source_file"] or source_file,
+                        row["source_drawer_id"],
+                        row["adapter_name"],
+                    ),
+                ).fetchone()
+                if clash:
+                    return clash["id"]
                 new_id = make_triple_id(sub_id, pred, obj_id, boundary, utc_now_iso())
                 conn.execute(
                     """INSERT INTO triples (

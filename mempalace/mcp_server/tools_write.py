@@ -454,6 +454,43 @@ def _collapse_drawer_rows(ids, documents, metadatas):
     return drawers
 
 
+def _chunk_spans(content: str, chunk_size: int):
+    """Slice ``content`` into ``(start, text)`` spans, merging a runt tail.
+
+    THE ONE SLICER. Three call sites built this loop independently --
+    ``_build_chunk_rows``, ``tool_add_drawer``'s oversized branch and
+    ``tool_diary_write``'s entry branch -- and the 2026-07-22 min_chunk_size
+    fix (6edaa68) landed in only the first. Measured 2026-09-18: 53 runt
+    chunks in the live palace, 31 from the add_drawer path and 22 from the
+    diary path, zero from the patched one. The arithmetic matched exactly,
+    which is how the two unpatched copies were found. Keep this the only
+    place ``range(0, len(x), chunk_size)`` appears for drawer content.
+
+    A fixed-width slice leaves a runt tail (1601 chars -> 800/800/1). Such a
+    chunk carries no retrievable meaning and behaves as a hub vector:
+    measured 2026-07-22, 34 sub-50-char chunks took 25% of vector top-5 slots
+    on exact-term queries, and a bare newline outscored every correct hit.
+    Merge rather than drop -- on a diary drawer the tail is the provenance
+    footer, so dropping would lose data. chunk_index stays positional, so
+    indices remain contiguous.
+    """
+    chunk_size = max(1, int(chunk_size or 1))
+    if content == "":
+        return [(0, "")]
+
+    spans = [
+        (start, content[start : start + chunk_size]) for start in range(0, len(content), chunk_size)
+    ]
+
+    min_chunk = max(0, int(getattr(_config, "min_chunk_size", 50) or 0))
+    if len(spans) > 1 and len(spans[-1][1]) < min_chunk:
+        _, tail = spans.pop()
+        pstart, pdoc = spans[-1]
+        spans[-1] = (pstart, pdoc + tail)
+
+    return spans
+
+
 def _build_chunk_rows(drawer_id: str, content: str, meta: dict, chunk_size: int):
     chunk_size = max(1, int(chunk_size or 1))
 
@@ -461,14 +498,7 @@ def _build_chunk_rows(drawer_id: str, content: str, meta: dict, chunk_size: int)
     base_meta.pop("chunk_index", None)
     base_meta["parent_drawer_id"] = drawer_id
 
-    spans = (
-        [(0, "")]
-        if content == ""
-        else [
-            (start, content[start : start + chunk_size])
-            for start in range(0, len(content), chunk_size)
-        ]
-    )
+    spans = _chunk_spans(content, chunk_size)
 
     chunk_ids = []
     chunk_docs = []
@@ -502,6 +532,8 @@ def tool_add_drawer(
     """
     global _metadata_cache
     try:
+        # M11: canonical_wing is the fork wrapper (wing_aliases after upstream's slug),
+        # so wing_<x> / underscores / aliases cannot mint duplicate wings
         wing = canonical_wing(wing, "wing")
         room = sanitize_name(room, "room")
         content = sanitize_content(content)
@@ -510,6 +542,21 @@ def tool_add_drawer(
         added_by = strip_lone_surrogates(added_by)
     except ValueError as e:
         return {"success": False, "error": str(e)}
+
+    # I6(2A): block injection/exfil content; quarantine + return, never raise.
+    # Wrap a copy for validation only -- do not mutate content before storage.
+    _cv_ok, _cv_reason = validate_content(
+        wrap_long_lines(content), source="add_drawer:%s" % added_by
+    )
+    if not _cv_ok:
+        _qpath = quarantine_content(content, _cv_reason, source="add_drawer:%s" % added_by)
+        logger.warning("[content-validator] add_drawer quarantined (%s): %s", _cv_reason, _qpath)
+        return {
+            "success": False,
+            "reason": "quarantined",
+            "detail": _cv_reason,
+            "quarantine_path": _qpath,
+        }
 
     col = _get_collection(create=True)
     if not col:
@@ -537,6 +584,9 @@ def tool_add_drawer(
         "added_by": added_by,
         "filed_at": utc_now_iso(),
         "id_recipe": ID_RECIPE,
+        "embedding_model": _DEFAULT_EMBED_MODEL,
+        "source": "mcp",
+        "session_id": _MCP_SESSION_ID,
     }
     if source_file:
         # A drawer filed here names a source file the same way a mined one
@@ -587,6 +637,17 @@ def tool_add_drawer(
                 )
             _invalidate_overview_caches()
             logger.info(f"Filed drawer: {drawer_id} -> {wing}/{room}")
+            try:
+                _get_kg().upsert_document(
+                    drawer_id=drawer_id,
+                    content=content,
+                    wing=wing,
+                    room=room,
+                    source_file=source_file or "",
+                    embedding_model=_DEFAULT_EMBED_MODEL,
+                )
+            except Exception as _doc_err:
+                logger.warning("Document store write failed for %s: %s", drawer_id, _doc_err)
             outcome = {
                 "success": True,
                 "drawer_id": drawer_id,
@@ -605,10 +666,10 @@ def tool_add_drawer(
         chunk_ids: list[str] = []
         chunk_docs: list[str] = []
         chunk_metas: list[dict] = []
-        for i in range(0, len(content), chunk_size):
+        for i, chunk_doc in _chunk_spans(content, chunk_size):
             chunk_idx = i // chunk_size
             chunk_ids.append(f"{drawer_id}_chunk_{chunk_idx:06d}")
-            chunk_docs.append(content[i : i + chunk_size])
+            chunk_docs.append(chunk_doc)
             chunk_metas.append(
                 {**base_meta, "chunk_index": chunk_idx, "parent_drawer_id": drawer_id}
             )
@@ -624,6 +685,17 @@ def tool_add_drawer(
             )
         _invalidate_overview_caches()
         logger.info(f"Filed drawer: {drawer_id} -> {wing}/{room} ({len(chunk_ids)} chunks)")
+        try:
+            _get_kg().upsert_document(
+                drawer_id=drawer_id,
+                content=content,
+                wing=wing,
+                room=room,
+                source_file=source_file or "",
+                embedding_model=_DEFAULT_EMBED_MODEL,
+            )
+        except Exception as _doc_err:
+            logger.warning("Document store write failed for %s: %s", drawer_id, _doc_err)
         outcome = {
             "success": True,
             "drawer_id": drawer_id,
@@ -660,6 +732,10 @@ def _delete_record(col, drawer_id: str, record, *, bulk: bool = False):
     _wal_log("delete_drawer", details)
 
     col.delete(ids=record["ids"])
+    try:
+        _get_kg().delete_document(drawer_id)
+    except Exception as _doc_err:
+        logger.warning("Document store delete failed for %s: %s", drawer_id, _doc_err)
     _invalidate_overview_caches()
 
     from ..palace import drawers_removed
@@ -1360,7 +1436,7 @@ def tool_list_drawers(
     offset = max(0, offset)
 
     try:
-        wing = _sanitize_optional_name(wing, "wing")
+        wing = _read_wing(_sanitize_optional_name(wing, "wing"))  # DR41
         room = _sanitize_optional_name(room, "room")
         since_dt = parse_date_bound(since, "since")
         before_dt = parse_date_bound(before, "before")
@@ -1461,6 +1537,24 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
                 new_doc = sanitize_content(content)
             except ValueError as e:
                 return {"success": False, "error": str(e)}
+            # I6: block injection/exfil content on update too, as tool_add_drawer
+            # does. Validate a wrapped copy; store the text unwrapped (verbatim).
+            _cv_ok, _cv_reason = validate_content(
+                wrap_long_lines(new_doc), source="update_drawer:%s" % drawer_id
+            )
+            if not _cv_ok:
+                _qpath = quarantine_content(
+                    new_doc, _cv_reason, source="update_drawer:%s" % drawer_id
+                )
+                logger.warning(
+                    "[content-validator] update_drawer quarantined (%s): %s", _cv_reason, _qpath
+                )
+                return {
+                    "success": False,
+                    "reason": "quarantined",
+                    "detail": _cv_reason,
+                    "quarantine_path": _qpath,
+                }
 
         new_meta = dict(old_meta)
         if content is not None:
@@ -1468,7 +1562,7 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
 
         if wing is not None:
             try:
-                wing = canonical_wing(wing, "wing")
+                wing = canonical_wing(wing, "wing")  # M11
             except ValueError as e:
                 return {"success": False, "error": str(e)}
             # Case-sensitive comparison: a case-only rename IS a rename.
@@ -1571,6 +1665,19 @@ def tool_update_drawer(drawer_id: str, content: str = None, wing: str = None, ro
                 closet_sources=[source_file] if source_file else (),
             ).get("closets_deleted", 0)
         _invalidate_overview_caches()
+        if content is not None:
+            # F8: keep the raw-text document store in step with the drawer.
+            try:
+                _get_kg().upsert_document(
+                    drawer_id=drawer_id,
+                    content=new_doc,
+                    wing=new_meta.get("wing", ""),
+                    room=new_meta.get("room", ""),
+                    source_file=new_meta.get("source_file", ""),
+                    embedding_model=new_meta.get("embedding_model", _DEFAULT_EMBED_MODEL),
+                )
+            except Exception as _doc_err:
+                logger.warning("Document store update failed for %s: %s", drawer_id, _doc_err)
         if revision_id:
             outcome["revision_id"] = revision_id
         _wal_result("update_drawer", outcome)

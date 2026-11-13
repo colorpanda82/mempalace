@@ -19,11 +19,13 @@ Usage:
 import hashlib
 import json
 import logging
+import os
 import re
 from pathlib import Path
 
 from . import paths
 from .config import MempalaceConfig
+from .content_validator import quarantine_content, validate_content, wrap_long_lines
 from .fsio import decode_source, encoding_metadata
 from .miner import _extract_entities_for_metadata
 from .palace import (
@@ -134,6 +136,19 @@ def ingest_diaries(
     for diary_path in diary_files:
         text, source_encoding = decode_source(diary_path.read_bytes(), universal_newlines=True)
         if len(text.strip()) < 50:
+            continue
+
+        # I6.3: losslessly wrap dense >2000-char lines so the per-line validator accepts them.
+        text = wrap_long_lines(text)
+        # I6(1): quarantine + skip a poisoned daily-summary file; never raise (flusher safety).
+        _cv_ok, _cv_reason = validate_content(text, source=str(diary_path))
+        if not _cv_ok:
+            quarantine_content(text, _cv_reason, source=str(diary_path))
+            logger.warning(
+                "[content-validator] ingest skipped poisoned file %s: %s",
+                diary_path,
+                _cv_reason,
+            )
             continue
 
         date_match = re.match(r"(\d{4}-\d{2}-\d{2})", diary_path.stem)
@@ -268,7 +283,9 @@ def ingest_diaries(
             }
         days_updated += 1
 
-    state_file.write_text(json.dumps(state, indent=2))
+    _tmp = state_file.with_suffix(".tmp")
+    _tmp.write_text(json.dumps(state, indent=2))
+    os.replace(_tmp, state_file)
     if days_updated:
         print(f"Diary: {days_updated} days updated, {closets_created} new closets")
 

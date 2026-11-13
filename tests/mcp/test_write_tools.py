@@ -63,7 +63,8 @@ class TestWriteTools:
         assert result["success"] is True
         stored = col.get(ids=[result["drawer_id"]], include=["metadatas"])
         assert stored["metadatas"], stored
-        assert stored["metadatas"][0]["wing"] == "my_project"
+        # fork M11: the stored form is hyphenated (upstream #2845 slugs to my_project)
+        assert stored["metadatas"][0]["wing"] == "my-project"
         # Rooms are NOT canonicalized in this change — they stay as given.
         assert stored["metadatas"][0]["room"] == "Scratch-Room"
 
@@ -176,9 +177,10 @@ class TestWriteTools:
             content="This is a test memory about Python decorators and metaclasses.",
         )
         assert result["success"] is True
-        assert result["wing"] == "test_wing"
+        assert result["wing"] == "test-wing"  # fork M11: write paths canonicalise the wing
         assert result["room"] == "test_room"
-        assert result["drawer_id"].startswith("drawer_test_wing_test_room_")
+        # fork M11: the drawer id is derived from the canonical wing
+        assert result["drawer_id"].startswith("drawer_test-wing_test_room_")
 
     def test_add_drawer_duplicate_detection(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
@@ -984,7 +986,7 @@ class TestWriteTools:
 
         result = tool_update_drawer("drawer_proj_backend_aaa", wing="new_wing", room="new_room")
         assert result["success"] is True
-        assert result["wing"] == "new_wing"
+        assert result["wing"] == "new-wing"  # fork M11: write paths canonicalise the wing
         assert result["room"] == "new_room"
 
     def test_update_drawer_case_only_wing_rename_applies(
@@ -1058,6 +1060,7 @@ class TestWriteTools:
 
         result = tool_update_drawer(drawer_id, wing="StableWing", room="stable_room")
         assert result["success"] is True
+        # fork M11: write paths canonicalise the wing (StableWing -> stablewing)
         assert result["wing"] == "stablewing"
         assert result["room"] == "stable_room"
 
@@ -1105,25 +1108,26 @@ class TestWriteTools:
             )
             assert existed["success"] is True, existed
 
+        # fork M11: write paths store wing_codex as "codex" (prefix stripped)
         pre = tool_list_wings()
         assert pre["wings"].get("wing_Codex") == 1
-        assert pre["wings"].get("wing_codex") == 3
+        assert pre["wings"].get("codex") == 3
 
         res = tool_update_drawer(drawer_id, wing="wing_codex", room="diary")
         assert res["success"] is True, res
-        # The echoed wing must be the caller's casing (the rename applied),
-        # not a stale echo of the old wing — the #2748 no-op symptom.
-        assert res["wing"] == "wing_codex", res
+        # The echoed wing must be the canonical destination (the rename
+        # applied), not a stale echo of the old wing — the #2748 no-op symptom.
+        assert res["wing"] == "codex", res
 
         # Stored record must agree with the response.
         stored = tool_get_drawer(drawer_id)
-        assert stored["wing"] == "wing_codex"
+        assert stored["wing"] == "codex"
         assert stored["room"] == "diary"
 
         # Clean move: source wing is fully vacated, destination absorbed the
         # drawer. No leftover ghost row, no counter drift (#2748 symptom).
         post = tool_list_wings()
-        assert post["wings"].get("wing_codex") == 4
+        assert post["wings"].get("codex") == 4
         assert "wing_Codex" not in post["wings"]
 
     def test_update_drawer_content_purges_matching_closets(

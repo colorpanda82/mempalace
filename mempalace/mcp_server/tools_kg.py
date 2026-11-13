@@ -36,6 +36,11 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
     if direction not in ("outgoing", "incoming", "both"):
         return {"error": "direction must be 'outgoing', 'incoming', or 'both'"}
 
+    entity, entity_note = resolve_entity(
+        entity,
+        fact_count=lambda n: _call_kg(lambda kg: kg.timeline_total(n), read=True),
+    )
+
     results = _call_kg(
         lambda kg: kg.query_entity(entity, as_of=as_of, direction=direction), read=True
     )
@@ -80,6 +85,8 @@ def tool_kg_query(entity: str, as_of: str = None, direction: str = "both"):
         candidates = _call_kg(lambda kg: kg.find_entity_candidates(entity), read=True)
         if candidates:
             payload["candidates"] = candidates
+    if entity_note:
+        payload["resolved_entity"] = entity_note
     return _with_kg_notice(payload)
 
 
@@ -105,25 +112,41 @@ def tool_kg_add(
     try:
         subject = sanitize_kg_value(subject, "subject")
         predicate = sanitize_name(predicate, "predicate")
+        submitted_predicate = predicate
+        predicate, _vocab_action, vocab_note = resolve_predicate(predicate)
         object = sanitize_kg_value(object, "object")
         valid_from = sanitize_iso_temporal(valid_from, "valid_from")
         valid_to = sanitize_iso_temporal(valid_to, "valid_to")
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
-    _wal_log(
-        "kg_add",
-        {
-            "subject": subject,
-            "predicate": predicate,
-            "object": object,
-            "valid_from": valid_from,
-            "valid_to": valid_to,
-            "source_closet": source_closet,
-            "source_file": source_file,
-            "source_drawer_id": source_drawer_id,
-        },
+    submitted_subject = subject
+    subject, subject_note = resolve_entity(
+        subject, fact_count=lambda n: _call_kg(lambda kg: kg.timeline_total(n), read=True)
     )
+    submitted_object = object
+    object, object_note = resolve_entity(
+        object, fact_count=lambda n: _call_kg(lambda kg: kg.timeline_total(n), read=True)
+    )
+    entity_notes = [n for n in (subject_note, object_note) if n]
+
+    wal_payload = {
+        "subject": subject,
+        "predicate": predicate,
+        "object": object,
+        "valid_from": valid_from,
+        "valid_to": valid_to,
+        "source_closet": source_closet,
+        "source_file": source_file,
+        "source_drawer_id": source_drawer_id,
+    }
+    if predicate != submitted_predicate:
+        wal_payload["predicate_submitted"] = submitted_predicate
+    if subject != submitted_subject:
+        wal_payload["subject_submitted"] = submitted_subject
+    if object != submitted_object:
+        wal_payload["object_submitted"] = submitted_object
+    _wal_log("kg_add", wal_payload)
 
     try:
         triple_id = _call_kg(
@@ -151,6 +174,10 @@ def tool_kg_add(
         "triple_id": triple_id,
         "fact": f"{subject} → {predicate} → {object}",
     }
+    if vocab_note:
+        outcome["note"] = vocab_note
+    if entity_notes:
+        outcome["resolved_entity"] = "; ".join(entity_notes)
     _wal_result("kg_add", outcome)
     return _with_kg_notice(outcome)
 
@@ -168,31 +195,75 @@ def tool_kg_invalidate(subject: str, predicate: str, object: str, ended: str = N
     try:
         subject = sanitize_kg_lookup(subject, "subject")
         predicate = sanitize_name(predicate, "predicate")
+        submitted_predicate = predicate
+        predicate, vocab_note = resolve_predicate_for_lookup(predicate)
         object = sanitize_kg_lookup(object, "object")
         ended = sanitize_iso_temporal(ended, "ended")
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
+    # F2: invalidate targets a SPECIFIC existing fact by exact identity --
+    # if the literal subject/object already holds it, operate on the
+    # literal, never redirect to a merge target that would silently match
+    # nothing (or the wrong triple).
+    submitted_subject = subject
+    subject, subject_note = resolve_entity(
+        subject,
+        fact_count=lambda n: _call_kg(lambda kg: kg.timeline_total(n), read=True),
+        prefer_literal_if_present=True,
+    )
+    submitted_object = object
+    object, object_note = resolve_entity(
+        object,
+        fact_count=lambda n: _call_kg(lambda kg: kg.timeline_total(n), read=True),
+        prefer_literal_if_present=True,
+    )
+    entity_notes = [n for n in (subject_note, object_note) if n]
+
     resolved_ended = ended or date.today().isoformat()
 
-    _wal_log(
-        "kg_invalidate",
-        {
-            "subject": subject,
-            "predicate": predicate,
-            "object": object,
-            "ended": resolved_ended,
-        },
-    )
+    wal_payload = {
+        "subject": subject,
+        "predicate": predicate,
+        "object": object,
+        "ended": resolved_ended,
+    }
+    if predicate != submitted_predicate:
+        wal_payload["predicate_submitted"] = submitted_predicate
+    if subject != submitted_subject:
+        wal_payload["subject_submitted"] = submitted_subject
+    if object != submitted_object:
+        wal_payload["object_submitted"] = submitted_object
+    _wal_log("kg_invalidate", wal_payload)
 
-    _call_kg(lambda kg: kg.invalidate(subject, predicate, object, ended=resolved_ended))
-    return _with_kg_notice(
-        {
-            "success": True,
-            "fact": f"{subject} → {predicate} → {object}",
-            "ended": resolved_ended,
-        }
-    )
+    matched = _call_kg(lambda kg: kg.invalidate(subject, predicate, object, ended=resolved_ended))
+    matched = int(matched or 0)
+
+    if matched == 0:
+        # Do NOT report success. The UPDATE matched nothing, so the caller's
+        # fact is still live; saying "ended" would be a silent false success.
+        err = (
+            f"no active fact matched {subject!r} -> {predicate!r} -> {object!r}; "
+            "nothing was invalidated"
+        )
+        if predicate != submitted_predicate:
+            err += (
+                f" (submitted predicate {submitted_predicate!r} resolved to "
+                f"{predicate!r}; a fact stored under the original alias would not match)"
+            )
+        return {"success": False, "error": err, "matched": 0}
+
+    result = {
+        "success": True,
+        "fact": f"{subject} → {predicate} → {object}",
+        "ended": resolved_ended,
+        "matched": matched,
+    }
+    if vocab_note:
+        result["note"] = vocab_note
+    if entity_notes:
+        result["resolved_entity"] = "; ".join(entity_notes)
+    return _with_kg_notice(result)
 
 
 def tool_kg_supersede(
@@ -216,36 +287,73 @@ def tool_kg_supersede(
     try:
         subject = sanitize_kg_lookup(subject, "subject")
         predicate = sanitize_name(predicate, "predicate")
+        submitted_predicate = predicate
+        # Write-time policy (same as tool_kg_add), not the lookup resolver used
+        # by tool_kg_invalidate: supersede OPENS a new fact under this
+        # predicate, so a banned or unknown predicate must be refused here or
+        # it lands in the graph unresolved (workspace BACKLOG BC3).
+        predicate, _vocab_action, vocab_note = resolve_predicate(predicate)
         old_object = sanitize_kg_lookup(old_object, "old_object")
         new_object = sanitize_kg_value(new_object, "new_object")
         at = sanitize_iso_temporal(at, "at")
     except ValueError as e:
         return {"success": False, "error": str(e)}
 
-    _wal_log(
-        "kg_supersede",
-        {
-            "subject": subject,
-            "predicate": predicate,
-            "old_object": old_object,
-            "new_object": new_object,
-            "at": at,
-        },
+    # F2: subject/old_object identify the EXISTING fact being closed -- if
+    # the literal already holds it, operate on the literal (same rationale
+    # as tool_kg_invalidate). new_object is the value being WRITTEN, so it
+    # keeps the forward-merge policy used by tool_kg_add.
+    submitted_subject = subject
+    subject, subject_note = resolve_entity(
+        subject,
+        fact_count=lambda n: _call_kg(lambda kg: kg.timeline_total(n), read=True),
+        prefer_literal_if_present=True,
     )
+    submitted_old_object = old_object
+    old_object, old_object_note = resolve_entity(
+        old_object,
+        fact_count=lambda n: _call_kg(lambda kg: kg.timeline_total(n), read=True),
+        prefer_literal_if_present=True,
+    )
+    submitted_new_object = new_object
+    new_object, new_object_note = resolve_entity(
+        new_object, fact_count=lambda n: _call_kg(lambda kg: kg.timeline_total(n), read=True)
+    )
+    entity_notes = [n for n in (subject_note, old_object_note, new_object_note) if n]
+
+    wal_payload = {
+        "subject": subject,
+        "predicate": predicate,
+        "old_object": old_object,
+        "new_object": new_object,
+        "at": at,
+    }
+    if predicate != submitted_predicate:
+        wal_payload["predicate_submitted"] = submitted_predicate
+    if subject != submitted_subject:
+        wal_payload["subject_submitted"] = submitted_subject
+    if old_object != submitted_old_object:
+        wal_payload["old_object_submitted"] = submitted_old_object
+    if new_object != submitted_new_object:
+        wal_payload["new_object_submitted"] = submitted_new_object
+    _wal_log("kg_supersede", wal_payload)
 
     # Domain ValueErrors from kg.supersede (e.g. inverted boundary) are left to
     # bubble to the dispatcher, matching tool_kg_add / tool_kg_invalidate: the
     # -32000 response carries error_class + message in error.data. Only input
     # sanitization above returns the {success: False} envelope.
     triple_id = _call_kg(lambda kg: kg.supersede(subject, predicate, old_object, new_object, at=at))
-    return _with_kg_notice(
-        {
-            "success": True,
-            "triple_id": triple_id,
-            "fact": f"{subject} → {predicate} → {new_object}",
-            "superseded": old_object,
-        }
-    )
+    result = {
+        "success": True,
+        "triple_id": triple_id,
+        "fact": f"{subject} → {predicate} → {new_object}",
+        "superseded": old_object,
+    }
+    if vocab_note:
+        result["note"] = vocab_note
+    if entity_notes:
+        result["resolved_entity"] = "; ".join(entity_notes)
+    return _with_kg_notice(result)
 
 
 def tool_kg_timeline(entity: str = None, limit: int = 100, offset: int = 0):

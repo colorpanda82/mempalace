@@ -46,7 +46,8 @@ def test_diary_write_chunked_logical_id_fetches_deletes_and_lists_as_one(
     assert fetched["chunks"] == written["chunks"]
     assert fetched["chunk_ids"] == written["chunk_ids"]
 
-    listed = tool_list_drawers(wing="wing_testagent", room="diary")
+    # fork M11: the default diary wing wing_<agent> is canonicalised to <agent>
+    listed = tool_list_drawers(wing="testagent", room="diary")
     assert listed["total"] == 1, "a chunked entry is ONE logical drawer, not N chunk rows"
     assert listed["drawers"][0]["drawer_id"] == entry_id
     assert listed["drawers"][0]["chunks"] == written["chunks"]
@@ -309,7 +310,8 @@ class TestDiaryTools:
         )
         assert written["success"] is True
         stored = col.get(ids=[written["entry_id"]], include=["metadatas"])
-        assert stored["metadatas"][0]["wing"] == "my_app"
+        # fork M11: the stored form is hyphenated (upstream #2845 slugs to my_app)
+        assert stored["metadatas"][0]["wing"] == "my-app"
 
         bad = tool_diary_write(
             agent_name="TestAgent",

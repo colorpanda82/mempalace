@@ -108,7 +108,6 @@ from ..backends.chroma import (  # noqa: E402
 from ..collision_scan import assert_no_collisions  # noqa: E402
 from ..config import (  # noqa: E402
     MempalaceConfig,
-    canonical_wing,
     normalize_wing_name,
     sanitize_content,
     sanitize_iso_temporal,
@@ -165,6 +164,40 @@ from ..stored_text import (  # noqa: E402
 )
 from ..timeutil import recency_key, utc_now_iso, utc_now_z  # noqa: E402
 from ..version import __version__  # noqa: E402
+
+# F8/Phase-B: model name stamped into documents-table provenance and drawer
+# metadata. Matches EmbeddinggemmaONNX.name() ("embeddinggemma_300m"). Plain
+# string only; the legacy Ollama embed shim is intentionally gone -- eg-384
+# embeds via the ChromaDB embedding function. (fork; lives here so every
+# exec'd fragment below sees it in the shared namespace)
+_DEFAULT_EMBED_MODEL = "embeddinggemma_300m"
+
+# I6: content validation + per-process MCP session id for write provenance (2C).
+import uuid as _uuid  # noqa: E402
+
+from ..config import canonical_wing as _upstream_canonical_wing  # noqa: E402
+from ..content_validator import quarantine_content, validate_content, wrap_long_lines  # noqa: E402
+from ..kg_entities import resolve_entity  # noqa: E402
+from ..kg_vocabulary import resolve_predicate, resolve_predicate_for_lookup  # noqa: E402
+from ..wing_aliases import canonical_wing as _fork_canonical_wing  # noqa: E402
+
+
+def canonical_wing(value: str, field_name: str = "wing") -> str:
+    """The wing the MCP write and read paths use (M11, fork; rebased onto 3.12).
+
+    3.12's ``config.canonical_wing`` (#2845) validates and slugs to the
+    underscore form (``jarvis-ops`` -> ``jarvis_ops``) and keeps a ``wing_``
+    prefix. The fork's stored form is hyphenated with no prefix and runs the
+    alias table, so the fork rule runs AFTER upstream's validation and slug:
+    upstream still rejects bad input and folds spaces and stray characters, and
+    ``wing_aliases.canonical_wing`` then decides what is stored. This name
+    shadows the upstream import above for every exec'd fragment.
+    """
+    slug = _upstream_canonical_wing(value, field_name)
+    return sanitize_name(_fork_canonical_wing(slug), field_name)
+
+
+_MCP_SESSION_ID = _uuid.uuid4().hex[:12]
 
 # ==================== WRITE-AHEAD LOG ====================
 # Every write operation is logged to a JSONL file before execution.

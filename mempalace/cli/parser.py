@@ -62,6 +62,9 @@ def main():
     )
 
     sub = parser.add_subparsers(dest="command")
+    from ..cli_workspace import register as _ws_register  # ws-hybrid-hook
+
+    _ws_register(sub)  # ws-hybrid-hook
 
     # init
     p_init = sub.add_parser("init", help="Detect rooms from your folder structure")
@@ -1124,64 +1127,96 @@ def main():
         help="Storage backend (default: config/env/detected/chroma)",
     )
 
+    # F5 — Phase 3 self-healing
+    p_rebuild = sub.add_parser(
+        "rebuild-index",
+        help="F8 — raw-text document store stats and re-embed trigger",
+    )
+    p_rebuild.add_argument(
+        "--execute",
+        action="store_true",
+        help="trigger re-embedding (delegates to Jarvis job)",
+    )
+    p_janitor = sub.add_parser("janitor", help="F5 decay scoring (read-only)")
+    p_janitor.add_argument("--wing", default=None)
+    p_janitor.add_argument("--limit", type=int, default=None)
+    p_janitor.add_argument(
+        "--backfill", action="store_true", help="Seed accessed_at=created_at for drawers missing it"
+    )
+    p_janitor.add_argument(
+        "--apply", action="store_true", help="Commit backfill writes (default: dry-run)"
+    )
+    p_shadow = sub.add_parser("shadow-index", help="F5 HyDE read-only flagging")
+    shadow_sub = p_shadow.add_subparsers(dest="action", required=True)
+    p_sa = shadow_sub.add_parser("audit", help="Sample triples and flag unsupported ones")
+    p_sa.add_argument("--n-samples", type=int, default=20)
+    p_sa.add_argument("--n-results", type=int, default=5)
+    p_sl = shadow_sub.add_parser("list-flagged", help="Show recent flagged triples")
+    p_sl.add_argument("--limit", type=int, default=20)
+
     args = parser.parse_args()
     _apply_backend_arg(args)
 
     if not args.command:
         parser.print_help()
-        return
+        return None
 
     # Handle two-level subcommands
+    from ..cli_workspace import maybe_dispatch as _ws_maybe_dispatch  # ws-hybrid-hook
+
+    _ws_rc = _ws_maybe_dispatch(args)  # ws-hybrid-hook
+    if _ws_rc is not None:  # ws-hybrid-hook
+        return _ws_rc  # ws-hybrid-hook
     if args.command == "hook":
         if not getattr(args, "hook_action", None):
             p_hook.print_help()
-            return
+            return None
         cmd_hook(args)
-        return
+        return None
 
     if args.command == "instructions":
         name = getattr(args, "instructions_name", None)
         if not name:
             p_instructions.print_help()
-            return
+            return None
         args.name = name
         cmd_instructions(args)
-        return
+        return None
 
     if args.command == "palace":
         if getattr(args, "palace_action", None) == "set-embedder":
             cmd_palace_set_embedder(args)
         else:
             p_palace.print_help()
-        return
+        return None
 
     if args.command == "logstream":
         if not getattr(args, "logstream_action", None):
             p_logstream.print_help()
-            return
+            return None
         cmd_logstream(args)
-        return
+        return None
 
     if args.command == "task":
         if not getattr(args, "task_action", None):
             p_task.print_help()
-            return
+            return None
         cmd_task(args)
-        return
+        return None
 
     if args.command == "artifact":
         if not getattr(args, "artifact_action", None):
             p_artifact.print_help()
-            return
+            return None
         cmd_artifact(args)
-        return
+        return None
 
     if args.command == "daemon":
         if not getattr(args, "daemon_action", None):
             p_daemon.print_help()
-            return
+            return None
         cmd_daemon(args)
-        return
+        return None
 
     dispatch = {
         "init": cmd_init,
@@ -1208,6 +1243,9 @@ def main():
         "export": cmd_export,
         "status": cmd_status,
         "update": cmd_update,
+        "janitor": cmd_janitor,
+        "shadow-index": cmd_shadow_index,
+        "rebuild-index": _cmd_rebuild_index,
     }
     exit_code = 0
     try:

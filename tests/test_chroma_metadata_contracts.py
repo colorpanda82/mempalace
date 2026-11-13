@@ -17,6 +17,16 @@ from mempalace.rooms import load_pending_apply, pending_apply_path
 _REAL_EMBED_TEXTS = ew._embed_texts
 
 
+# fork I4: ChromaCollection.add/upsert stamps {embedder, dim, indexed_at} on every
+# write for the drift reconciler. The embedder runs before the stamp and never
+# sees those keys; compare everything else.
+_PROVENANCE_KEYS = ("embedder", "dim", "indexed_at")
+
+
+def _unstamped(meta):
+    return {k: v for k, v in meta.items() if k not in _PROVENANCE_KEYS}
+
+
 @pytest.fixture
 def collection(tmp_path):
     client = chromadb.PersistentClient(
@@ -70,7 +80,7 @@ def test_actual_chroma_upsert_effective_titles(monkeypatch, collection, metadata
     wrapped, embed = wrapper(monkeypatch, collection)
     wrapped.upsert(ids=["known"], documents=["replacement"], metadatas=metadata)
     actual = collection.get(ids=["known"], include=["metadatas"])["metadatas"][0]
-    assert embed.calls[0][1][0] == actual
+    assert embed.calls[0][1][0] == _unstamped(actual)
 
 
 def test_real_chroma_mixed_input_order(monkeypatch, collection):
@@ -88,7 +98,7 @@ def test_real_chroma_mixed_input_order(monkeypatch, collection):
     )
     actual = collection.get(ids=["z", "new", "a"], include=["metadatas"])
     actual_by_id = dict(zip(actual["ids"], actual["metadatas"]))
-    assert embed.calls[0][1] == [actual_by_id[i] for i in ["z", "new", "a"]]
+    assert embed.calls[0][1] == [_unstamped(actual_by_id[i]) for i in ["z", "new", "a"]]
 
 
 @pytest.mark.parametrize("media_type", ["image", "audio", "video"])
@@ -264,8 +274,16 @@ def test_native_media_explicit_vectors_still_work(monkeypatch, collection):
     )
     result = collection.get(ids=["asset"], include=["documents", "metadatas", "embeddings"])
     assert result["documents"] == ["new description"]
-    assert result["metadatas"] == [{"media_type": "image", "title": "Changed"}]
+    assert [_unstamped(m) for m in result["metadatas"]] == [
+        {"media_type": "image", "title": "Changed"}
+    ]
     assert result["embeddings"].tolist() == [[0.0, 1.0]]
+    # I4 stamps dim from the caller's vector, but the embedder name is the
+    # configured text embedder's, even though no embedder produced this vector.
+    (stamp,) = result["metadatas"]
+    assert stamp["dim"] == 2
+    assert stamp["embedder"] == cb._current_embedder_provenance()[0]
+    assert stamp["indexed_at"]
 
 
 def test_list_reserved_metadata_policy_is_case_sensitive(collection, tmp_path):

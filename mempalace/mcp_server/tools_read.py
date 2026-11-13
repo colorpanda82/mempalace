@@ -421,6 +421,17 @@ def tool_status():
         logger.exception("tool_status metadata fetch failed")
         result["error"] = str(e)
         result["partial"] = True
+    # I4: fixed-ID canary -- confirm known-good drawers still retrieve (exact get(),
+    # immune to HNSW/dim issues). Never raises into status.
+    try:
+        from .canary import run_canary_check
+
+        cr = run_canary_check(col)
+        result["canary"] = cr["status"]
+        if cr["status"] not in ("ok", "unseeded"):
+            result["canary_missing"] = cr.get("missing_ids", [])
+    except Exception as _canary_exc:
+        result["canary"] = "error: %s" % _canary_exc
     return result
 
 
@@ -500,7 +511,7 @@ def tool_list_wings():
 
 def tool_list_rooms(wing: str = None):
     try:
-        wing = _sanitize_optional_name(wing, "wing")
+        wing = _read_wing(_sanitize_optional_name(wing, "wing"))  # DR41
     except ValueError as e:
         return {"error": str(e)}
     # A wing lists the rooms of every spelling its project was filed under.
@@ -606,6 +617,134 @@ def tool_get_taxonomy():
 _EXACT_MATCH_DISTANCE = 1e-5
 
 
+# DR30 (fork, 2026-09-30): fusion depth and drawer-level dedupe for tool_search.
+# search_memories fetches 3x ``n_results`` vector candidates, keeps the top
+# ``n_results`` by distance, merges 3x ``n_results`` BM25 candidates, then
+# hybrid-ranks. With a fixed depth of 100 the vector pool was 300 whatever the
+# caller's limit, and after ~100 old diaries were re-filed on 2026-09-17 the
+# expected drawers for golden rows 10 and 32 fell outside it (Recall@5 on the
+# original 40 rows 40/40 -> 37/40). Measured on the live palace 2026-09-30 over
+# the 21 golden search rows: depth 100 -> 18/21, 150 -> 19/21, 200 -> 20/21,
+# 300 -> 20/21; p50 89 / 94 / 105 / 130 ms. So the floor is 200 (pool 600),
+# scaling with the limit and capped at 400 (pool 1200) so limit=100 stays bounded.
+# No recency bias here: that changes what "relevant" means and is a separate call.
+_SEARCH_DEPTH_FLOOR = 200
+_SEARCH_DEPTH_PER_RESULT = 4
+_SEARCH_DEPTH_CAP = 400
+
+
+# The v3.11 media/code path (include_media / query_task) rejects n_results
+# above 100, so its depth is capped there rather than at _SEARCH_DEPTH_CAP.
+_MEDIA_SEARCH_DEPTH_CAP = 100
+
+
+def _search_depth(limit, experimental=None) -> int:
+    """Fusion depth handed to search_memories as ``n_results`` (pool = 3x this).
+
+    ``experimental`` holds the media/code kwargs; when set, the depth is capped
+    at what that path accepts, so it still retrieves past ``limit`` and the
+    one-hit-per-drawer collapse can fill ``limit`` slots.
+    """
+    try:
+        n = int(limit or 5)
+    except (TypeError, ValueError):
+        n = 5
+    depth = min(max(n * _SEARCH_DEPTH_PER_RESULT, _SEARCH_DEPTH_FLOOR), _SEARCH_DEPTH_CAP)
+    if experimental:
+        depth = min(depth, _MEDIA_SEARCH_DEPTH_CAP)
+    return depth
+
+
+def _dedupe_by_drawer(hits):
+    """Keep the best-ranked hit per logical drawer, preserving rank order.
+
+    Chunks of one drawer share ``drawer_id`` (``_result_drawer_id`` resolves
+    ``parent_drawer_id``), and each used to take its own top-``limit`` slot, so a
+    top 5 could hold 4 drawers. ``hits`` arrive already hybrid-ranked, so the
+    first occurrence is the best-scoring chunk. Hits without a ``drawer_id`` are
+    kept as they are.
+    """
+    seen = set()
+    out = []
+    for hit in hits:
+        key = hit.get("drawer_id") if isinstance(hit, dict) else None
+        if key:
+            if key in seen:
+                continue
+            seen.add(key)
+        out.append(hit)
+    return out
+
+
+def _finish_search_result(result, limit) -> None:
+    """Collapse to one hit per drawer, cut to ``limit`` (DR30), then annotate
+    the lexical-support signal. Shared by the normal and transient-retry paths.
+    """
+    if not (isinstance(result, dict) and isinstance(result.get("results"), list)):
+        return
+    result["results"] = _dedupe_by_drawer(result["results"])[:limit]  # DR30
+    # Lexical-support signal. Vector distance carries NO relevance
+    # information on this corpus -- measured 2026-07-22, correct hits
+    # span 0.2343-0.2952 while junk spans 0.2848-0.3777, and a nonsense
+    # query once retrieved a bare newline at 0.1675, beating every
+    # correct hit. So a distance threshold cannot express confidence.
+    # BM25 overlap can: over 16 probe queries, all 10 with a correct
+    # answer scored > 0 (weakest 2.95) and 5 of 6 with no correct answer
+    # scored exactly 0.
+    # Annotated, NOT filtered: the sample is small and every good query
+    # in it shared vocabulary with its target. A pure-synonym query could
+    # legitimately score 0, and dropping those results would destroy
+    # recall silently. A flag cannot -- worst case it mislabels a good
+    # result while still returning it.
+    _lex = max(
+        (float(h.get("bm25_score") or 0.0) for h in result["results"]),
+        default=0.0,
+    )
+    result["lexical_support"] = round(_lex, 3)
+    result["low_confidence"] = _lex == 0.0
+    if result["low_confidence"] and result["results"]:
+        result["confidence_note"] = (
+            "No returned drawer shares any term with this query. On this "
+            "corpus that pattern usually means the subject is absent and "
+            "these are nearest-neighbour noise. Distance is not a "
+            "reliability signal here, so treat these as unverified."
+        )
+
+
+def _known_wings() -> set:
+    """Wing names present in the palace (sqlite fast path, else tool_list_wings)."""
+    try:
+        fast = _sqlite_taxonomy()
+        if fast is not None:
+            return set(fast[1])
+        return set((tool_list_wings() or {}).get("wings", {}))
+    except Exception:
+        return set()
+
+
+def _read_wing(raw):
+    """Wing to filter a read by (DR41, fork 2026-09-30).
+
+    The M11 write paths store canonical wings, so a reader asking for
+    ``wing_cowork`` must look in ``cowork``. But drawers written before M11, or by
+    writers outside the MCP (upstream's diary default and hooks_cli still mint
+    ``wing_<name>``), can sit under the raw name, and a filter that only ever
+    looked for the canonical form would make them unreachable. So: the canonical
+    name when the palace holds it, otherwise the name as given. The wing lookup
+    runs only when canonicalisation changes the name.
+    """
+    if not raw:
+        return raw
+    try:
+        canon = canonical_wing(raw)
+    except ValueError:
+        # 3.12's slug can empty a name sanitize_name accepted; read it as given.
+        return raw
+    if canon == raw:
+        return raw
+    return canon if canon in _known_wings() else raw
+
+
 def tool_search(
     query: str,
     limit: int = 5,
@@ -624,7 +763,7 @@ def tool_search(
 ):
     limit = max(1, min(limit, _MAX_RESULTS))
     try:
-        wing = _sanitize_optional_name(wing, "wing")
+        wing = _read_wing(_sanitize_optional_name(wing, "wing"))  # DR41
         room = _sanitize_optional_name(room, "room")
         source_file = _sanitize_optional_source_file(source_file)
     except ValueError as e:
@@ -722,6 +861,23 @@ def tool_search(
     # here would defeat the fallback — it constructs a PersistentClient
     # which can segfault on segment load when the HNSW index has diverged.
     _refresh_vector_disabled_flag()
+    # Retrieval depth (100). Measured 2026-07-22 across depths 5/10/20/50/100 on 7
+    # known-answer queries: 5, 10, 20 and 50 all found 6/7 while 100 found 7/7,
+    # and p50 latency was FLAT across the whole range (148-158ms) -- depth is
+    # close to free here because a fixed per-call cost dominates. So the top of
+    # the literature's 50-200 band is the right end for this corpus.
+    # Fusion can only rank what was retrieved: a lexically
+    # perfect drawer absent from the vector pool arrives with distance=None and
+    # is capped below junk that IS in the pool. Industry norm for fusion depth is
+    # 50-200; this path used the caller's limit (5). Retrieve deep, return limit.
+    # Union + max_distance=0.0 only when the caller set no explicit bound --
+    # _merge_bm25_union_candidates returns early above 0.0, and an explicit bound
+    # is a real contract we must not silently drop. Measured: the 1.5 default
+    # filters nothing (whole observed distance range is 0.16-0.38).
+    _explicit_bound = min_similarity is not None or max_distance is not None
+    _strategy = candidate_strategy if _explicit_bound else "union"
+    _dist = dist if _explicit_bound else 0.0
+    _depth = _search_depth(limit, experimental)  # DR30
     result = search_memories(
         sanitized["clean_query"],
         palace_path=_config.palace_path,
@@ -730,13 +886,14 @@ def tool_search(
         source_file=source_file,
         since=since,
         before=before,
-        n_results=limit,
-        max_distance=dist,
+        n_results=_depth,
+        max_distance=_dist,
         vector_disabled=_vector_disabled,
-        candidate_strategy=candidate_strategy,
+        candidate_strategy=_strategy,
         collection_name=_config.collection_name,
         **experimental,
     )
+    _finish_search_result(result, limit)  # DR30 + lexical-support signal
     if _is_transient_index_error(result):
         # Post-bulk-write HNSW flush window: drop caches, give
         # the segment a moment to settle, retry once. Caller never sees
@@ -744,6 +901,23 @@ def tool_search(
         _force_chroma_cache_reset()
         time.sleep(2)
         _refresh_vector_disabled_flag()
+        # Retrieval depth (100). Measured 2026-07-22 across depths 5/10/20/50/100 on 7
+        # known-answer queries: 5, 10, 20 and 50 all found 6/7 while 100 found 7/7,
+        # and p50 latency was FLAT across the whole range (148-158ms) -- depth is
+        # close to free here because a fixed per-call cost dominates. So the top of
+        # the literature's 50-200 band is the right end for this corpus.
+        # Fusion can only rank what was retrieved: a lexically
+        # perfect drawer absent from the vector pool arrives with distance=None and
+        # is capped below junk that IS in the pool. Industry norm for fusion depth is
+        # 50-200; this path used the caller's limit (5). Retrieve deep, return limit.
+        # Union + max_distance=0.0 only when the caller set no explicit bound --
+        # _merge_bm25_union_candidates returns early above 0.0, and an explicit bound
+        # is a real contract we must not silently drop. Measured: the 1.5 default
+        # filters nothing (whole observed distance range is 0.16-0.38).
+        _explicit_bound = min_similarity is not None or max_distance is not None
+        _strategy = candidate_strategy if _explicit_bound else "union"
+        _dist = dist if _explicit_bound else 0.0
+        _depth = _search_depth(limit, experimental)  # DR30
         result = search_memories(
             sanitized["clean_query"],
             palace_path=_config.palace_path,
@@ -752,13 +926,14 @@ def tool_search(
             source_file=source_file,
             since=since,
             before=before,
-            n_results=limit,
-            max_distance=dist,
+            n_results=_depth,
+            max_distance=_dist,
             vector_disabled=_vector_disabled,
-            candidate_strategy=candidate_strategy,
+            candidate_strategy=_strategy,
             collection_name=_config.collection_name,
             **experimental,
         )
+        _finish_search_result(result, limit)  # DR30 + lexical-support signal
         if not _is_transient_index_error(result):
             result["index_recovered"] = True
     if _vector_disabled:
@@ -857,8 +1032,8 @@ def tool_traverse_graph(start_room: str, max_hops: int = 2):
 def tool_find_tunnels(wing_a: str = None, wing_b: str = None):
     """Find rooms that bridge two wings — the hallways connecting domains."""
     try:
-        wing_a = _sanitize_optional_name(wing_a, "wing_a")
-        wing_b = _sanitize_optional_name(wing_b, "wing_b")
+        wing_a = _read_wing(_sanitize_optional_name(wing_a, "wing_a"))  # DR41
+        wing_b = _read_wing(_sanitize_optional_name(wing_b, "wing_b"))  # DR41
     except ValueError as e:
         return {"error": str(e)}
     if _graph_sqlite_reader() is None:
@@ -935,7 +1110,7 @@ def tool_create_tunnel(
 def tool_list_tunnels(wing: str = None):
     """List all explicit cross-wing tunnels, optionally filtered by wing."""
     try:
-        wing = _sanitize_optional_name(wing, "wing")
+        wing = _read_wing(_sanitize_optional_name(wing, "wing"))  # DR41
     except ValueError as e:
         return {"error": str(e)}
     return list_tunnels(wing)
@@ -957,7 +1132,7 @@ def tool_list_hallways(wing: str = None, limit: int = 100, offset: int = 0):
     that page is read from the store.
     """
     try:
-        wing = _sanitize_optional_name(wing, "wing")
+        wing = _read_wing(_sanitize_optional_name(wing, "wing"))  # DR41
     except ValueError as e:
         return {"error": str(e)}
     page, total = list_hallways_page(wing, limit=limit, offset=offset)
@@ -988,7 +1163,7 @@ def tool_follow_tunnels(wing: str, room: str, record: bool = True):
     it takes the tunnel file's own lock and never touches the vector store.
     """
     try:
-        wing = sanitize_name(wing, "wing")
+        wing = _read_wing(sanitize_name(wing, "wing"))  # DR41
         room = sanitize_name(room, "room")
     except ValueError as e:
         return {"error": str(e)}

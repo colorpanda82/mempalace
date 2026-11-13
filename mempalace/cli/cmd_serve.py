@@ -24,6 +24,69 @@ def cmd_rules(args):
     run_rules(host=args.host, harness=args.harness, project=args.project, mcp=args.mcp)
 
 
+def cmd_janitor(args):
+    """F5 janitor — decay scoring (read-only) + optional accessed_at backfill."""
+    import json as _json
+
+    from ..janitor import backfill_metadata, scan, summarize, write_report
+
+    if args.backfill:
+        n = backfill_metadata(dry_run=not args.apply)
+        action = "backfilled" if args.apply else "would-backfill (dry-run)"
+        print(f"janitor: {action} {n} drawers")
+        return
+    rows = scan(wing=args.wing, limit=args.limit)
+    p = write_report(rows)
+    print(f"janitor: wrote {len(rows)} rows -> {p}")
+    print(f"janitor: summary {_json.dumps(summarize(rows), sort_keys=True)}")
+
+
+def cmd_shadow_index(args):
+    """F5 shadow index — HyDE read-only flagging of KG triples vs ChromaDB."""
+    import json as _json
+
+    from ..shadow_index import audit, list_flagged
+
+    if args.action == "audit":
+        r = audit(n_samples=args.n_samples, n_results=args.n_results)
+        print(_json.dumps(r, sort_keys=True))
+        return
+    if args.action == "list-flagged":
+        for row in list_flagged(limit=args.limit):
+            print(_json.dumps(row, sort_keys=True))
+
+
+def _cmd_rebuild_index(args):
+    """F8 — report document store stats; --execute triggers re-embedding."""
+    import os
+
+    from .. import paths
+    from ..config import MempalaceConfig
+    from ..knowledge_graph import KnowledgeGraph
+
+    # The document store lives in the KG file the MCP writes resolve to, so read
+    # it through 3.12's one resolver (#2850), the way ``mempalace kg`` does.
+    palace = getattr(args, "palace", None)
+    palace_path = os.path.expanduser(palace) if palace else MempalaceConfig().palace_path
+    db_path = (
+        paths.knowledge_graph_path(palace_path, explicit=bool(palace)) if palace_path else None
+    )
+    kg = KnowledgeGraph(db_path=db_path)
+    total = kg.document_count()
+    print(f"Raw-text document store: {total} documents")
+
+    if total == 0:
+        print("Store is empty — new add_drawer calls will populate it going forward.")
+        print("Run a backfill job to populate from existing ChromaDB drawers.")
+        return
+
+    if not args.execute:
+        print("Pass --execute to trigger re-embedding (delegates to Jarvis job).")
+        return
+
+    print("Re-embed: dispatch scripts/f8-rebuild-index.py as a Jarvis job.")
+
+
 def cmd_mcp(args):
     """Show how to wire MemPalace into MCP-capable hosts."""
     base_server_cmd = "mempalace-mcp"

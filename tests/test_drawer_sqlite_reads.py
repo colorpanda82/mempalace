@@ -72,7 +72,21 @@ class _Clock:
         return cls.at.isoformat()
 
 
-def _written_metadata(server, *, wing="wing_alpha", room="notes", **extra):
+# fork I4: ChromaCollection.upsert stamps {embedder, dim, indexed_at} on every
+# write for the drift reconciler; these tests are about the other keys.
+_PROVENANCE_KEYS = ("embedder", "dim", "indexed_at")
+
+
+def _fresh_get(monkeypatch, server, collection, drawer_id):
+    result = _cold_get(monkeypatch, server, collection, drawer_id)
+    if isinstance(result.get("metadata"), dict):
+        for key in _PROVENANCE_KEYS:
+            result["metadata"].pop(key, None)
+    return result
+
+
+# fork M11: MCP write paths canonicalise the wing, so wing_alpha is stored as alpha
+def _written_metadata(server, *, wing="alpha", room="notes", **extra):
     return {
         "wing": wing,
         "room": room,
@@ -81,6 +95,10 @@ def _written_metadata(server, *, wing="wing_alpha", room="notes", **extra):
         "filed_at": "2026-10-02T12:00:00",
         "last_modified": "2026-10-02T12:00:00",
         "id_recipe": server.ID_RECIPE,
+        # fork: tool_add_drawer records the embedder and MCP session provenance
+        "embedding_model": server._DEFAULT_EMBED_MODEL,
+        "source": "mcp",
+        "session_id": server._MCP_SESSION_ID,
         "chunk_index": 0,
         **extra,
     }
@@ -388,7 +406,7 @@ def test_drawer_sqlite_fresh_single_add_update_delete_without_intervening_sdk_re
     drawer_id = added["drawer_id"]
     expected = _payload(drawer_id, content, _written_metadata(server))
     # Read immediately after ACK, before a legacy get/count/query can refresh storage.
-    assert _cold_get(monkeypatch, server, collection, drawer_id) == expected
+    assert _fresh_get(monkeypatch, server, collection, drawer_id) == expected
 
     monkeypatch.setattr(_Clock, "at", datetime(2026, 10, 2, 13, 0, 0))
     with _without_sdk_drawer_get(monkeypatch, collection):
@@ -396,11 +414,10 @@ def test_drawer_sqlite_fresh_single_add_update_delete_without_intervening_sdk_re
             drawer_id, content="Edited 日本語", wing="wing_beta", room="updated"
         )
     assert updated["success"] is True
-    expected.update(content="Edited 日本語", wing="wing_beta", room="updated")
-    expected["metadata"].update(
-        wing="wing_beta", room="updated", last_modified="2026-10-02T13:00:00"
-    )
-    assert _cold_get(monkeypatch, server, collection, drawer_id) == expected
+    # fork M11: wing_beta is stored as beta
+    expected.update(content="Edited 日本語", wing="beta", room="updated")
+    expected["metadata"].update(wing="beta", room="updated", last_modified="2026-10-02T13:00:00")
+    assert _fresh_get(monkeypatch, server, collection, drawer_id) == expected
 
     with _without_sdk_drawer_get(monkeypatch, collection):
         deleted = server.tool_delete_drawer(drawer_id)
@@ -425,6 +442,9 @@ def test_drawer_sqlite_fresh_chunk_mutations_preserve_physical_vs_logical_scope(
     monkeypatch.setattr(server, "utc_now_iso", _Clock.iso)
     monkeypatch.setattr(_Clock, "at", datetime(2026, 10, 2, 12, 0, 0))
     monkeypatch.setitem(config._file_config, "chunk_size", 80)
+    # fork: _chunk_spans merges a tail under min_chunk_size into the previous
+    # chunk; disable that so the short tail stays its own physical row.
+    monkeypatch.setitem(config._file_config, "min_chunk_size", 0)
     content = "A" * 80 + "B" * 80 + "日本語 🧠 end"
     added = server.tool_add_drawer("wing_alpha", "notes", content, added_by="test-writer")
     assert added["success"] is True
@@ -432,7 +452,7 @@ def test_drawer_sqlite_fresh_chunk_mutations_preserve_physical_vs_logical_scope(
     logical_id = added["drawer_id"]
     original_ids = added["chunk_ids"]
     metadata = _written_metadata(server, parent_drawer_id=logical_id)
-    assert _cold_get(monkeypatch, server, collection, logical_id) == _payload(
+    assert _fresh_get(monkeypatch, server, collection, logical_id) == _payload(
         logical_id, content, metadata, chunk_ids=original_ids
     )
 
@@ -446,10 +466,10 @@ def test_drawer_sqlite_fresh_chunk_mutations_preserve_physical_vs_logical_scope(
         changed_meta = _written_metadata(
             server, parent_drawer_id=logical_id, chunk_index=1, last_modified="2026-10-02T13:00:00"
         )
-        assert _cold_get(monkeypatch, server, collection, target) == _payload(
+        assert _fresh_get(monkeypatch, server, collection, target) == _payload(
             target, replacement, changed_meta
         )
-        assert _cold_get(monkeypatch, server, collection, logical_id) == _payload(
+        assert _fresh_get(monkeypatch, server, collection, logical_id) == _payload(
             logical_id, "A" * 80 + replacement + "日本語 🧠 end", metadata, chunk_ids=original_ids
         )
     else:
@@ -457,7 +477,7 @@ def test_drawer_sqlite_fresh_chunk_mutations_preserve_physical_vs_logical_scope(
             server, parent_drawer_id=logical_id, last_modified="2026-10-02T13:00:00"
         )
         assert updated["chunks"] == 2
-        assert _cold_get(monkeypatch, server, collection, target) == _payload(
+        assert _fresh_get(monkeypatch, server, collection, target) == _payload(
             logical_id, replacement, changed_meta, chunk_ids=updated["chunk_ids"]
         )
 
@@ -468,10 +488,74 @@ def test_drawer_sqlite_fresh_chunk_mutations_preserve_physical_vs_logical_scope(
     assert sqlite_drawer_rows(config.palace_path, config.collection_name, drawer_id=target) is None
     if physical:
         assert deleted["deleted_ids"] == [target]
-        assert _cold_get(monkeypatch, server, collection, logical_id) == _payload(
+        assert _fresh_get(monkeypatch, server, collection, logical_id) == _payload(
             logical_id,
             "A" * 80 + "日本語 🧠 end",
             metadata,
             chunk_ids=[original_ids[0], original_ids[2]],
+        )
+    assert server.tool_get_drawer(target) == {"error": f"Drawer not found: {target}"}
+
+
+@pytest.mark.parametrize("physical", [False, True])
+def test_drawer_sqlite_fresh_chunk_mutations_with_production_tail_merge(
+    drawer_palace, monkeypatch, config, physical
+):
+    """As above, with the fork's runt-tail merge on (min_chunk_size default 50):
+    the 11-char tail joins the second chunk, so the drawer has two rows."""
+    from mempalace.backends.chroma import sqlite_drawer_rows
+
+    server, collection = drawer_palace
+    # 3.12 stamps filed_at / last_modified through utc_now_iso, not datetime.now
+    monkeypatch.setattr(server, "utc_now_iso", _Clock.iso)
+    monkeypatch.setattr(_Clock, "at", datetime(2026, 10, 2, 12, 0, 0))
+    monkeypatch.setitem(config._file_config, "chunk_size", 80)
+    assert config.min_chunk_size == 50
+    tail = "日本語 🧠 end"
+    content = "A" * 80 + "B" * 80 + tail
+    added = server.tool_add_drawer("wing_alpha", "notes", content, added_by="test-writer")
+    assert added["success"] is True
+    assert added["chunks"] == 2
+    logical_id = added["drawer_id"]
+    original_ids = added["chunk_ids"]
+    metadata = _written_metadata(server, parent_drawer_id=logical_id)
+    assert _fresh_get(monkeypatch, server, collection, logical_id) == _payload(
+        logical_id, content, metadata, chunk_ids=original_ids
+    )
+    assert _fresh_get(monkeypatch, server, collection, original_ids[1])["content"] == (
+        "B" * 80 + tail
+    )
+
+    target = original_ids[1] if physical else logical_id
+    # logical: 100 chars slice to 80 + a 20-char runt, which merges back to one row
+    replacement = "Edited physical chunk" if physical else "X" * 100
+    monkeypatch.setattr(_Clock, "at", datetime(2026, 10, 2, 13, 0, 0))
+    with _without_sdk_drawer_get(monkeypatch, collection):
+        updated = server.tool_update_drawer(target, content=replacement)
+    assert updated["success"] is True
+    if physical:
+        changed_meta = _written_metadata(
+            server, parent_drawer_id=logical_id, chunk_index=1, last_modified="2026-10-02T13:00:00"
+        )
+        assert _fresh_get(monkeypatch, server, collection, target) == _payload(
+            target, replacement, changed_meta
+        )
+        assert _fresh_get(monkeypatch, server, collection, logical_id) == _payload(
+            logical_id, "A" * 80 + replacement, metadata, chunk_ids=original_ids
+        )
+    else:
+        assert updated["chunks"] == 1
+        got = _fresh_get(monkeypatch, server, collection, target)
+        assert got["content"] == replacement
+
+    with _without_sdk_drawer_get(monkeypatch, collection):
+        deleted = server.tool_delete_drawer(target)
+    assert deleted["success"] is True
+    assert deleted["chunks_deleted"] == 1
+    assert sqlite_drawer_rows(config.palace_path, config.collection_name, drawer_id=target) is None
+    if physical:
+        assert deleted["deleted_ids"] == [target]
+        assert _fresh_get(monkeypatch, server, collection, logical_id) == _payload(
+            logical_id, "A" * 80, metadata, chunk_ids=[original_ids[0]]
         )
     assert server.tool_get_drawer(target) == {"error": f"Drawer not found: {target}"}

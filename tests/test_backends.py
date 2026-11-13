@@ -1082,7 +1082,9 @@ def test_chroma_get_all_metadata_reads_sqlite_in_one_pass(tmp_path, monkeypatch)
 
     monkeypatch.setattr(col._collection, "get", _no_chroma_get)
     assert col.get_all_metadata() == expected
-    assert expected[-1] is None  # the "bare" drawer
+    # the "bare" drawer: fork I4 stamps provenance on every write, so it holds
+    # only {embedder, dim, indexed_at} where upstream stores no metadata
+    assert set(expected[-1]) == {"embedder", "dim", "indexed_at"}
 
 
 def test_chroma_iter_metadata_projects_keys_and_requires_a_key(tmp_path):
@@ -1100,7 +1102,8 @@ def test_chroma_iter_metadata_projects_keys_and_requires_a_key(tmp_path):
 
 def test_chroma_iter_metadata_equals_scopes_the_scan(tmp_path):
     col = _recent_palace(tmp_path)
-    everything = [m for m in col.get_all_metadata() if m]
+    # fork I4: the bare drawer carries provenance keys only, no wing
+    everything = [m for m in col.get_all_metadata() if m and "wing" in m]
     rare = list(col.iter_metadata(["wing", "room"], equals={"wing": "rare"}))
     assert rare == [
         {"wing": m["wing"], "room": m["room"]} for m in everything if m["wing"] == "rare"
@@ -2981,3 +2984,50 @@ def test_chroma_reset_by_another_owner_reopens_backend_and_keeps_its_client(tmp_
     finally:
         first.close()
         second.close()
+
+
+# ── chromadb-1.x sub-sync_threshold scaffold (eg-384 .drift loop fix) ──────
+
+
+def test_quarantine_leaves_chroma1x_sub_threshold_scaffold(tmp_path):
+    """Regression: a chromadb-1.x collection below hnsw:sync_threshold leaves a
+    metadata-less, empty-link_lists scaffold on disk; it must NOT be
+    quarantined (the .drift loop on small eg-384 palaces)."""
+    import gc
+
+    import chromadb
+
+    palace = tmp_path / "palace"
+    client = chromadb.PersistentClient(path=str(palace))
+    col = client.create_collection("regress_collection")
+    col.add(
+        ids=[f"id{i}" for i in range(20)],
+        embeddings=[[float((i * 7 + j) % 13) for j in range(384)] for i in range(20)],
+        documents=[f"doc{i}" for i in range(20)],
+    )
+    col.get(ids=["id0"])
+    del col, client
+    gc.collect()
+
+    seg_dirs = [
+        p
+        for p in palace.iterdir()
+        if p.is_dir()
+        and "-" in p.name
+        and ".drift-" not in p.name
+        and (p / "data_level0.bin").is_file()
+    ]
+    assert len(seg_dirs) == 1, f"expected one vector segment, got {seg_dirs}"
+    seg = seg_dirs[0]
+    assert (seg / "data_level0.bin").stat().st_size > _HNSW_MISSING_METADATA_DATA_FLOOR
+    assert not (seg / "index_metadata.pickle").exists()
+    link = seg / "link_lists.bin"
+    assert (not link.exists()) or link.stat().st_size == 0, "test assumes empty-link_lists scaffold"
+
+    now = 1_700_000_000.0
+    os.utime(seg / "data_level0.bin", (now - 7200, now - 7200))
+    os.utime(palace / "chroma.sqlite3", (now, now))
+
+    moved = quarantine_stale_hnsw(str(palace), stale_seconds=3600.0)
+    assert moved == [], f"sub-threshold scaffold was wrongly quarantined: {moved}"
+    assert seg.exists()
