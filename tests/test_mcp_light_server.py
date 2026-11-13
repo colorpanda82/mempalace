@@ -172,7 +172,7 @@ class TestPalaceExec:
         get_res = mcp_light_server.handle_light_request(get_req)
         get_payload = json.loads(get_res["result"]["content"][0]["text"])
         assert get_payload.get("drawer_id") == drawer_id
-        assert get_payload.get("wing") == "test-wing"  # fork M11: write paths canonicalise the wing
+        assert get_payload.get("wing") == "test_wing"
         assert get_payload.get("room") == "test_room"
         assert "OAuth2 token rotation" in get_payload.get("content", "")
 
