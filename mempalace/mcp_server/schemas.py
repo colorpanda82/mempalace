@@ -731,6 +731,10 @@ TOOLS = {
                     "type": "string",
                     "description": "Alias for 'entry' — accepted because add_drawer uses 'content'. Provide either 'entry' or 'content'; 'entry' wins if both are given.",
                 },
+                "force": {
+                    "type": "boolean",
+                    "description": "File the entry even when identical text is already in the palace (default false: an identical entry is skipped and reported as a duplicate).",
+                },
             },
             # 'entry' (or its alias 'content') is enforced at dispatch, not via a
             # top-level anyOf: Anthropic rejects schemas with a top-level

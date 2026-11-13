@@ -384,6 +384,7 @@ def _h_diary_write(args):
         entry=args.entry,
         topic=args.topic,
         wing=args.wing,
+        force=getattr(args, "force", False),
     )
     return _emit(result, args)
 
@@ -581,6 +582,9 @@ def register(sub):
     p.add_argument("--entry", required=True)
     p.add_argument("--topic", default="general")
     p.add_argument("--wing", default="")
+    p.add_argument(
+        "--force", action="store_true", help="File it even if identical text is already filed"
+    )
 
     # diary-read
     p = _common(sub.add_parser("diary-read", help="Read agent diary entries"))
