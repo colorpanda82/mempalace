@@ -23,6 +23,8 @@ from mempalace.searcher import _closet_boosts
 _REAL_CLOSET = {"wing": "w", "room": "r", "source_file": "real.md", "drawer_count": 1}
 # What ``mempalace compress`` wrote into the closets before this change: the
 # drawer's own id and metadata plus its compression stats.
+_PROVENANCE_KEYS = ("embedder", "dim", "indexed_at")
+
 _LEGACY_AAAK = {
     "wing": "w",
     "room": "r",
@@ -85,7 +87,12 @@ def test_compress_moves_older_aaak_rows_out_of_the_closets(tmp_path):
         ids=["drawer_w_r_aaak"], include=["documents", "metadatas"]
     )
     assert moved["documents"] == ["KUBERNETES.ROLLOUT|notes.deploy|★★"]
-    assert moved["metadatas"][0] == {**_LEGACY_AAAK, "kind": "aaak"}
+    # fork I4: the write into the AAAK collection stamps {embedder, dim,
+    # indexed_at}; the moved row carries everything else exactly.
+    stamp = {k: moved["metadatas"][0][k] for k in _PROVENANCE_KEYS}
+    assert all(stamp.values()), stamp
+    rest = {k: v for k, v in moved["metadatas"][0].items() if k not in _PROVENANCE_KEYS}
+    assert rest == {**_LEGACY_AAAK, "kind": "aaak"}
 
 
 def test_an_interrupted_move_keeps_the_closet_copy_until_the_aaak_copy_is_stored(

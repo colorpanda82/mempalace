@@ -199,9 +199,14 @@ def test_chroma_keyed_metadata_scans_decode(tmp_path):
     assert sqlite_wing_source_counts(str(tmp_path), "mempalace_drawers") == [("w", transcript, 1)]
 
 
-def test_chroma_list_drawers_reader_decodes(tmp_path):
+def test_chroma_list_drawers_reader_decodes(tmp_path, monkeypatch):
+    from mempalace.backends import chroma
     from mempalace.backends.chroma import sqlite_list_id_metadata
 
+    # fork I4: seed with upstream's unstamped write; this pins the reader's
+    # decoding, and the {embedder, dim, indexed_at} stamp is pinned in
+    # test_chroma_metadata_contracts.py.
+    monkeypatch.setattr(chroma, "_stamp_provenance", lambda metadatas, _emb, _ids: metadatas)
     col = _chroma(tmp_path)
     col.add(
         documents=["one", "two"],

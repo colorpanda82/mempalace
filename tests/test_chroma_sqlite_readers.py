@@ -94,7 +94,12 @@ _DRAWERS = [
 
 
 @pytest.fixture
-def palace(tmp_path):
+def palace(tmp_path, monkeypatch):
+    # fork I4: ChromaCollection.add stamps {embedder, dim, indexed_at} on every
+    # write. This test pins the raw-SQLite READERS on a known palace, so it
+    # seeds the palace with upstream's unstamped write; the stamp itself is
+    # pinned in test_chroma_metadata_contracts.py.
+    monkeypatch.setattr(chroma, "_stamp_provenance", lambda metadatas, _emb, _ids: metadatas)
     path = tmp_path / "palace"
     col = chroma.ChromaBackend().get_collection(
         palace=PalaceRef(id=str(path), local_path=str(path)),
