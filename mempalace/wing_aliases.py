@@ -91,6 +91,21 @@ def canonical_wing(name: str) -> str:
     return WING_ALIASES.get(w, w)
 
 
+def canonical_stored_wing(value: str, field_name: str = "wing") -> str:
+    """The wing a write stores for ``value``: validated, slugged, canonical.
+
+    Upstream's ``config.canonical_wing`` validates and slugs (raising
+    ``ValueError`` on bad input), then :func:`canonical_wing` applies the
+    ``wing_`` strip and the alias table. ``mcp_server.canonical_wing`` and
+    ``ws-migrate-wings`` both use this, so a migrated wing is exactly what a
+    new write would store.
+    """
+    from .config import canonical_wing as upstream_canonical_wing, sanitize_name
+
+    slug = upstream_canonical_wing(value, field_name)
+    return sanitize_name(canonical_wing(slug), field_name)
+
+
 def _spellings(slug: str) -> list[str]:
     hyphens = slug.replace("_", "-")
     out = []

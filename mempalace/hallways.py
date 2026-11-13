@@ -1342,3 +1342,70 @@ def drop_wing_hallways(wing: str, config=None) -> int:
     """Remove every hallway record of ``wing``. Returns how many were removed."""
     with _hallway_file_lock(config), _writing(config) as conn:
         return conn.execute("DELETE FROM hallways WHERE wing = ?", (wing,)).rowcount
+
+
+# ── Fork: wing re-keying (ws-migrate-wings) ──────────────────────────────────
+
+
+def hallway_wing_counts(config=None) -> dict[str, int]:
+    """``{wing: hallway records}`` for every stored wing; reads only."""
+    conn = _reader(config)
+    if conn is None:
+        counts: dict[str, int] = {}
+        for h in _load_hallways_json(config):
+            wing = h.get("wing") if isinstance(h, dict) else None
+            if isinstance(wing, str):
+                counts[wing] = counts.get(wing, 0) + 1
+        return counts
+    with contextlib.closing(conn):
+        rows = conn.execute("SELECT wing, COUNT(*) FROM hallways GROUP BY wing").fetchall()
+    return {w: n for w, n in rows if isinstance(w, str)}
+
+
+def rename_wing_hallways(renames: dict[str, str], config=None) -> dict[str, int]:
+    """Re-key the hallway records of each ``old`` wing to ``renames[old]``.
+
+    Fork (ws-migrate-wings). A record keeps its entity pair, counts, rooms and
+    dynamics; only ``wing`` changes, and an id a mine derived from the old wing
+    is re-derived from the new one so the next recompute finds the record
+    (and its dynamics) again. When two wings merge and both hold the same
+    pair, the record with the higher ``co_occurrence_count`` is kept (the
+    target's on a tie) and the other is removed: both are derived from the
+    drawers, and the next mine recomputes the merged wing's counts.
+
+    Returns ``{"moved": n, "merged": n}``. Running it again changes nothing.
+    """
+    moved = merged = 0
+    if not renames:
+        return {"moved": 0, "merged": 0}
+    with _hallway_file_lock(config), _writing(config) as conn:
+        for old, new in renames.items():
+            if old == new:
+                continue
+            rows = conn.execute(
+                "SELECT id, record FROM hallways WHERE wing = ? ORDER BY rowid", (old,)
+            ).fetchall()
+            for hallway_id, raw in rows:
+                record = json.loads(raw)
+                a, b = str(record.get("entity_a")), str(record.get("entity_b"))
+                new_id = hallway_id
+                if hallway_id == _hallway_id(old, a, b):
+                    new_id = _hallway_id(new, a, b)
+                conn.execute("DELETE FROM hallways WHERE id = ?", (hallway_id,))
+                existing = (
+                    conn.execute("SELECT record FROM hallways WHERE id = ?", (new_id,)).fetchone()
+                    if new_id != hallway_id
+                    else None
+                )
+                if existing is not None:
+                    other = json.loads(existing[0])
+                    merged += 1
+                    if int(other.get("co_occurrence_count") or 0) >= int(
+                        record.get("co_occurrence_count") or 0
+                    ):
+                        continue
+                record["wing"] = new
+                record["id"] = new_id
+                conn.execute(_UPSERT, _row(record))
+                moved += 1
+    return {"moved": moved, "merged": merged}

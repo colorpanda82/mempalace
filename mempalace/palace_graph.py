@@ -1329,3 +1329,66 @@ def entity_tunnels_for_wing(
             )
             created.append(tunnel)
     return created
+
+
+# ── Fork: wing re-keying (ws-migrate-wings) ──────────────────────────────────
+
+
+def tunnel_wing_counts(config=None) -> dict:
+    """``{wing: tunnel endpoints}`` over the explicit tunnels; reads only."""
+    counts: dict = {}
+    for t in _load_tunnels(config):
+        if not isinstance(t, dict):
+            continue
+        for end in ("source", "target"):
+            wing = (t.get(end) or {}).get("wing")
+            if isinstance(wing, str):
+                counts[wing] = counts.get(wing, 0) + 1
+    return counts
+
+
+def rename_tunnel_wings(renames: dict, config=None) -> int:
+    """Rewrite the endpoint wings of explicit tunnels; returns endpoints moved.
+
+    Fork (ws-migrate-wings). A tunnel whose id is the canonical id of its old
+    endpoints gets the canonical id of its new ones, so a later
+    ``create_tunnel`` of the same endpoints updates it instead of adding a
+    twin; if another tunnel already holds that id (two wings merged), the
+    tunnel keeps its old id, so no tunnel is dropped. Running it again
+    changes nothing.
+    """
+    if not renames:
+        return 0
+    config = config or MempalaceConfig()
+    moved = 0
+    with mine_lock(_get_tunnel_file(config)):
+        tunnels = _load_tunnels(config, for_write=True)
+        ids = {t.get("id") for t in tunnels if isinstance(t, dict)}
+        for t in tunnels:
+            if not isinstance(t, dict):
+                continue
+            src, tgt = t.get("source"), t.get("target")
+            ends = [e for e in (src, tgt) if isinstance(e, dict)]
+            if not any(e.get("wing") in renames for e in ends):
+                continue
+            was_canonical = False
+            if len(ends) == 2:
+                try:
+                    was_canonical = t.get("id") == _canonical_tunnel_id(
+                        src["wing"], src["room"], tgt["wing"], tgt["room"]
+                    )
+                except (KeyError, TypeError):
+                    was_canonical = False
+            for e in ends:
+                if e.get("wing") in renames:
+                    e["wing"] = renames[e["wing"]]
+                    moved += 1
+            if was_canonical:
+                new_id = _canonical_tunnel_id(src["wing"], src["room"], tgt["wing"], tgt["room"])
+                if new_id not in ids:
+                    ids.discard(t.get("id"))
+                    t["id"] = new_id
+                    ids.add(new_id)
+        if moved:
+            _save_tunnels(tunnels, config)
+    return moved

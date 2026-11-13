@@ -175,11 +175,10 @@ _DEFAULT_EMBED_MODEL = "embeddinggemma_300m"
 # I6: content validation + per-process MCP session id for write provenance (2C).
 import uuid as _uuid  # noqa: E402
 
-from ..config import canonical_wing as _upstream_canonical_wing  # noqa: E402
 from ..content_validator import quarantine_content, validate_content, wrap_long_lines  # noqa: E402
 from ..kg_entities import resolve_entity  # noqa: E402
 from ..kg_vocabulary import resolve_predicate, resolve_predicate_for_lookup  # noqa: E402
-from ..wing_aliases import canonical_wing as _fork_canonical_wing  # noqa: E402
+from ..wing_aliases import canonical_stored_wing as _canonical_stored_wing  # noqa: E402
 
 
 def canonical_wing(value: str, field_name: str = "wing") -> str:
@@ -192,8 +191,7 @@ def canonical_wing(value: str, field_name: str = "wing") -> str:
     ``brave_new_media``), whose targets are underscore slugs too. This name
     shadows the upstream import above for every exec'd fragment.
     """
-    slug = _upstream_canonical_wing(value, field_name)
-    return sanitize_name(_fork_canonical_wing(slug), field_name)
+    return _canonical_stored_wing(value, field_name)
 
 
 _MCP_SESSION_ID = _uuid.uuid4().hex[:12]

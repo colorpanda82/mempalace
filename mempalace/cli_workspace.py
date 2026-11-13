@@ -455,6 +455,35 @@ def _h_ws_selftest(args):
     return 0 if not missing else 1
 
 
+def _h_ws_migrate_wings(args):
+    """Re-key every stored wing to its canonical name (dry run unless --apply).
+
+    Never imports mcp_server and never goes through the hub: a re-key is a
+    maintenance write that needs the palace's writer lease, so it refuses
+    while a hub serves the palace. ``--palace`` pointing at a copy is how to
+    run it with a hub up.
+    """
+    from mempalace.wing_migrate import HubHoldsPalace, format_report, migrate_wings
+
+    explicit = bool(getattr(args, "palace", None))
+    palace = _resolve_palace(args)
+    try:
+        with _stdout_to_stderr():
+            result = migrate_wings(palace, apply=bool(args.apply), explicit=explicit)
+    except HubHoldsPalace as e:
+        if args.json:
+            _out(json.dumps({"success": False, "error": str(e)}, ensure_ascii=False))
+        else:
+            print(f"error: {e}", file=sys.stderr)
+        return 2
+    if args.json:
+        _out(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+    else:
+        for line in format_report(result):
+            _out(line)
+    return 0 if result["counts_ok"] else 1
+
+
 # Single source of truth mapping our command names -> handlers.
 COMMANDS = {
     "kg-add": _h_kg_add,
@@ -467,6 +496,7 @@ COMMANDS = {
     "diary-read": _h_diary_read,
     "search-json": _h_search_json,
     "ws-selftest": _h_ws_selftest,
+    "ws-migrate-wings": _h_ws_migrate_wings,
 }
 
 
@@ -569,6 +599,16 @@ def register(sub):
     # excluded while a bound is set (v3.7.0 #2000).
     p.add_argument("--since", help="ISO date/datetime, inclusive")
     p.add_argument("--before", help="ISO date/datetime, exclusive")
+
+    # ws-migrate-wings: re-key stored wings to the canonical (upstream slug +
+    # alias table) name in every store; a dry run unless --apply.
+    p = _common(
+        sub.add_parser(
+            "ws-migrate-wings",
+            help="Rename every stored wing to its canonical name (dry run unless --apply)",
+        )
+    )
+    p.add_argument("--apply", action="store_true", help="Perform the migration")
 
     # ws-selftest (no palace/tool call needed)
     _common(

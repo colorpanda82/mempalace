@@ -454,18 +454,21 @@ def _normalized_wing_target(wing):
     return target
 
 
-def plan_wing_renames(items):
+def plan_wing_renames(items, target_for=None):
     """Pure planner over ``(id, metadata)`` pairs.
 
     Returns ``(summary, updates)`` where ``summary`` is ``{(old, new): count}``
     and ``updates`` is ``[(id, new_metadata), ...]`` for only the records whose
     wing changes. Metadata is copied; only the ``wing`` key is rewritten.
+    ``target_for`` maps a wing to its new name or ``None`` (fork: the
+    ``ws-migrate-wings`` canonical rule); the default is the separator strip.
     """
+    target_for = target_for or _normalized_wing_target
     summary = defaultdict(int)
     updates = []
     for rec_id, meta in items:
         meta = dict(meta or {})
-        target = _normalized_wing_target(meta.get("wing"))
+        target = target_for(meta.get("wing"))
         if target is None:
             continue
         summary[(meta["wing"], target)] += 1
@@ -496,8 +499,9 @@ def _apply_wing_updates(col, updates, batch_size=500):
         col.update(ids=[u[0] for u in chunk], metadatas=[u[1] for u in chunk])
 
 
-def _plan_topics_by_wing_renames():
+def _plan_topics_by_wing_renames(target_for=None):
     """Return ``{old_wing: new_wing}`` for ``topics_by_wing`` keys to normalize."""
+    target_for = target_for or _normalized_wing_target
     try:
         from .miner import _load_known_entities_raw
 
@@ -509,7 +513,7 @@ def _plan_topics_by_wing_renames():
         return {}
     renames = {}
     for wing in list(tbw.keys()):
-        target = _normalized_wing_target(wing)
+        target = target_for(wing)
         if target is not None:
             renames[wing] = target
     return renames
